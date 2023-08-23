@@ -543,6 +543,8 @@ if __name__ == "__main__":
                 configuration.session_ticket = pickle.load(fp)
         except FileNotFoundError:
             pass
+    
+    configuration.idle_timeout = 60 * 60;
 
     if uvloop is not None:
         uvloop.install()

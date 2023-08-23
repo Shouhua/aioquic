@@ -66,11 +66,14 @@ class QuicPacketPacer:
             self.evaluation_time = now
 
     def update_rate(self, congestion_window: int, smoothed_rtt: float) -> None:
+        # 传输的速率
         pacing_rate = congestion_window / max(smoothed_rtt, K_MICRO_SECOND)
+        # 最大的datagram需要传输的时间
         self.packet_time = max(
             K_MICRO_SECOND, min(K_MAX_DATAGRAM_SIZE / pacing_rate, K_SECOND)
-        )
+        ) 
 
+        # bucket_max最大的传输速率
         self.bucket_max = (
             max(
                 2 * K_MAX_DATAGRAM_SIZE,
