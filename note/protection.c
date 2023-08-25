@@ -3,6 +3,7 @@
  * OpenSSl version: 3.0.2
  * gcc -Wall -Wextra -pedantic -g -o protection protection.c -lssl -lcrypto
  * https://github.com/openssl/openssl/issues/12220 why aes-128-gcm is not working on command line
+ * openssl kdf -keylen 32 -kdfopt digest:SHA2-256 -kdfopt hexkey:8394c8f03e515708 -kdfopt hexsalt:38762cf7f55934b34d179ae6a4c80cadccbb7f0a -kdfopt hexinfo:00200f746c73313320636c69656e7420696e00 HKDF
  * echo -e -n "\\xd1\\xb1\\xc9\\x8d\\xd7\\x68\\x9f\\xb8\\xec\\x11\\xd2\\x42\\xb1\\x23\\xdc\\x9b" > sample.txt
  * openssl enc -aes-128-ecb -v -p -e -nosalt -K 9f50449e04a0e810283a1e9933adedd2 -in sample.txt -out sample.aes
  */

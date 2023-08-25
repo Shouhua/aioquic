@@ -310,6 +310,8 @@ class SignatureAlgorithm(IntEnum):
     ECDSA_SECP256R1_SHA256 = 0x0403
     ECDSA_SECP384R1_SHA384 = 0x0503
     ECDSA_SECP521R1_SHA512 = 0x0603
+    # EdDSA自己内部集成了hash，这个在DSA中need notable
+    # Demystifying cryptography with openssl 3.0(page 135)
     ED25519 = 0x0807
     ED448 = 0x0808
     RSA_PKCS1_SHA256 = 0x0401

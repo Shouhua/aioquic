@@ -1,3 +1,9 @@
+## 2023-08-25
+### 阅读[Demystifying cryptography with OpenSSL 3.0](https://download.bibis.ir/Books/Security/IT-Security/Cryptography/2022/Demystifying-Cryptography-with-OpenSSL-3.0-Discover-the-best-techniques-to-enhance-your-network-security-with-OpenSSL-3.0-(Khlebnikov,-AlexeiAdolfsen,-Jarle)_bibis.ir.pdf)
+1. an encryption key is not the same as a password, but an encryption key can be derived from a password
+2. It is important to know that when a message is signed, usually, the digital signature algorithm is not applied to the message itself. Instead, the signature algorithm is applied to the message digest, which is produced by some cryptographic hash functions, such as SHA-256. 
+3. asymmetric encryption每次最多加密自己的key长度的plain text，这就是为什么RSA要使用加密session key(symmetric encrpytion)的方式, 说白了，非对称加密是为了解决对称密钥传送的问题
+4. DSA(Digital Signature Algorithm)使用非对加密的private key加密信息的**hash**，private_key_sign(sha(message))
 ## 2023-08-24
 1. long header packet需要加密第一个自己的后4位，short header packet是第一个自己的后5位
 ```
@@ -75,4 +81,16 @@ binascii.a2b_hex(hex_str) # 01020304
 struct.unpack('HH', raw) # (12849, 13363) -> (0x3231, 0x3433)
 struct.unpack('HH', hex_str) # (513, 1027) -> (0x201, 0x403)
 struct.unpack('>HH', hex_str) # (258, 1027) -> (0x102, 0x304)
+```
+8. **解密大致跟加密步骤差不多，有一点需要注意，short packet中有key phase(first_byte & 4)，key phase是变更时，header protection remove还是使用原先的密钥(hp)，payload解密使用新生成的密钥，原因是只有拿到里header才能确认key phase是否变更了:)**
+9. Openssl command line encryption
+```shell
+# 使用HKDF算法获取client key
+# key(cid): 8394c8f03e515708
+# salt: 38762cf7f55934b34d179ae6a4c80cadccbb7f0a
+# label(encode('tls client in')): 00200f746c73313320636c69656e7420696e00
+openssl kdf -keylen 32 -kdfopt digest:SHA2-256 -kdfopt hexkey:8394c8f03e515708 -kdfopt hexsalt:38762cf7f55934b34d179ae6a4c80cadccbb7f0a -kdfopt hexinfo:00200f746c73313320636c69656e7420696e00 HKDF
+# 根据protected payload内容获取sample，然后使用AES-128-ECB算法获取mask
+echo -e -n "\\xd1\\xb1\\xc9\\x8d\\xd7\\x68\\x9f\\xb8\\xec\\x11\\xd2\\x42\\xb1\\x23\\xdc\\x9b" > sample.txt
+openssl enc -aes-128-ecb -v -p -e -nosalt -K 9f50449e04a0e810283a1e9933adedd2 -in sample.txt -out sample.aes
 ```
