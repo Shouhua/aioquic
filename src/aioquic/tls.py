@@ -278,14 +278,17 @@ class ExtensionType(IntEnum):
 
 
 class Group(IntEnum):
+    # NIST P-256
     SECP256R1 = 0x0017
     SECP384R1 = 0x0018
     SECP521R1 = 0x0019
+    # EdDSA使用的椭圆曲线
     X25519 = 0x001D
     X448 = 0x001E
     GREASE = 0xAAAA
 
 
+# CLIENT_HELLO, SERVER_HELLO外其他的都需要加密
 class HandshakeType(IntEnum):
     CLIENT_HELLO = 1
     SERVER_HELLO = 2
@@ -314,6 +317,7 @@ class SignatureAlgorithm(IntEnum):
     # Demystifying cryptography with openssl 3.0(page 135)
     ED25519 = 0x0807
     ED448 = 0x0808
+    # RSA使用PKCS1标准的padding
     RSA_PKCS1_SHA256 = 0x0401
     RSA_PKCS1_SHA384 = 0x0501
     RSA_PKCS1_SHA512 = 0x0601
@@ -463,6 +467,7 @@ def push_psk_binder(buf: Buffer, binder: bytes) -> None:
 Extension = Tuple[int, bytes]
 
 
+# client PSK extension内容
 @dataclass
 class OfferedPsks:
     identities: List[PskIdentity]
@@ -490,7 +495,9 @@ class ClientHello:
     other_extensions: List[Extension] = field(default_factory=list)
 
 
+# 这里不包括recorder header(5 bytes)
 def pull_client_hello(buf: Buffer) -> ClientHello:
+    # 1 byte type, 3 bytes length
     assert buf.pull_uint8() == HandshakeType.CLIENT_HELLO
     with pull_block(buf, 3):
         assert buf.pull_uint16() == TLS_VERSION_1_2
@@ -1366,6 +1373,8 @@ class Context:
             tmp_buf = Buffer(capacity=1024)
             push_client_hello(tmp_buf, hello)
 
+            # NOTICE 这里的各种hash计算
+            # binder使用自己之前的所有hash - 2(长度) - 1
             # calculate binder
             hash_offset = tmp_buf.tell() - binder_length - 3
             self._key_schedule_psk.update_hash(tmp_buf.data_slice(0, hash_offset))

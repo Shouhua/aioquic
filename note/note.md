@@ -1,3 +1,79 @@
+## 2023-08-30
+计算handshake相关密钥，使用的hash包括client hello, server hello, 不包括各自的recored header(5 bytes)
+Tls1.3中计算application相关密钥时候，需要使用header hash，内容包括client hello, server hello, encrypted extension, Certificate, Certificate Verify, Finished, 假设没有CertificateRequest, 不包括各自的record header(5 bytes)
+## 2023-08-29
+1. Python和C互相调用, 场景虽然用到不多，但是考虑性能的代码却要使用，比如crypto相关的AEAD，head protection代码使用C代码重写  
+**需要注意的是，windows和linux平台import时的模块后缀有不同，网上大多举例windows平台，在linux平台可能会报模块没找到问题**
+```python
+# 判断当前平台的支持导入后缀
+import importlib
+print(importlib.machinery.all_suffixes())
+# window: ['.py', '.pyw', '.pyc', '.cp311-win_amd64.pyd', '.pyd']
+# linux: ['.py', '.pyc', '.cpython-310-x86_64-linux-gnu.so', '.abi3.so', '.so']
+# python导入的路径
+import sys
+print(sys.path)
+```
+## 2023-08-28
+### python
+1. ```bytes.fromhex("0003") -> b'\x00\x03'```
+2. ```int.from_bytes(b"\x00\x03", byteorder="big") -> '0x3'```
+3. [from contextlib import contextmanager](https://docs.python.org/3/library/contextlib.html)
+代码中大量应用，比如在解析TLS协议时候，新申请空间，yeild，最后做些校验或者释放资源
+```python
+from contextlib import contextmanager
+
+@contextmanager
+def managed_resource(*args, **kwds):
+    # Code to acquire resource, e.g.:
+    resource = acquire_resource(*args, **kwds)
+    try:
+        yield resource
+    finally:
+        # Code to release resource, e.g.:
+        release_resource(resource)
+
+with managed_resource(timeout=3600) as resource:
+    # Resource is released at the end of this block,
+    # even if code in the block raises an exception
+```
+### [tls1.3](https://www.gabriel.urdhr.fr/2022/02/26/tls1.3-intro/)
+- TLS1.3有三种握手类型
+1. (EC)DHE
+2. PSK-only
+3. PSK with (EC)DHE
+- 各个过程密钥生成过程  
+**hello_hash是不含有record header的，即不包括记录的前5个字节**
+```python
+# early key生成过程
+early_secret = HKDF_Extract(length=32, key=psk, salt=b"\x00")
+binder_key = HKDF_Expand(length=32, label="tls13 res binder", hash=SHA256(b""), key=early_secret)
+client_early_traffic_secret = HKDF_Expand(lenght=32, label="tls13 c e traffic", hash=client_hello_hash, key=early_secret)
+early_exporter_master_secret = HKDF_Exapnd(length=32, label="tls13 e exp master", hash=client_hello_hash, key=early_secret)
+# 握手密钥生成过程
+shared_secret = X25519.exchange(peer_pub_key, local_private_key)
+if resumption_keys:
+     early_secret = resumption_keys.early_secret
+else:
+     early_secret = HKDF_Extract(length=32, key=b"\x00"*32, salt=b"\x00")
+derived_secret = HKDF_Exapnd(length=32, label=b"tls13 derived", hash=SHA256(b""), key=early_secret)
+handshake_secret = HKDF_Extract(length=32, key=shared_secret, salt=derived_secret)
+client_handshake_traffic_secret = HKDF_Expand(length=32, label="tls13 c hs traffic", hash=hello_hash, key=handshake_secret)
+server_handshake_traffic_secret = HKDF_Expand(length=32, label="tls13 s hs traffic", hash=hello_hash, key=handshake_secret)
+client_handshake_key = HKDF_Expand(length=16, label="tls13 key", hash=b"", key=client_handshake_traffic_secret)
+client_handshake_key = HKDF_Expand(length=12, label="tls13 iv", hash=b"", key=client_handshake_traffic_secret)
+server_handshake_key = HKDF_Expand(length=16, label="tls13 key", hash=b"", key=server_handshake_traffic_secret)
+server_handshake_key = HKDF_Expand(length=12, label="tls13 iv", hash=b"", key=server_handshake_traffic_secret)
+# 应用密钥生成过程
+derived_secret = HKDF_Expand(length=32, label="tls13 derived", hash=SHA256(b""), key=handshake_secret)
+master_secret = HKDF_Extract(length=32, key=b"\x00"*32, salt=derived_secret)
+client_application_traffic_secret = HKDF_Expand(length=32, label="tls13 c ap traffic", hash=handshake_hash, key=master_secret)
+client_application_key = HKDF_Expand(length=16, label="tsl13 key", hash=b"", key=client_application_traffic_secret)
+client_application_iv = HKDF_Expand(length=12, label="tsl13 iv", hash=b"", key=client_application_traffic_secret)
+server_application_traffic_secret = HKDF_Expand(length=32, label="tls13 s ap traffic", hash=handshake_hash)
+server_application_key = HKDF_Expand(length=16, label="tsl13 key", hash=b"", key=server_application_traffic_secret)
+server_application_iv = HKDF_Expand(length=12, label="tsl13 iv", hash=b"", key=server_application_traffic_secret)
+```
 ## 2023-08-25
 ### 阅读[Demystifying cryptography with OpenSSL 3.0](https://download.bibis.ir/Books/Security/IT-Security/Cryptography/2022/Demystifying-Cryptography-with-OpenSSL-3.0-Discover-the-best-techniques-to-enhance-your-network-security-with-OpenSSL-3.0-(Khlebnikov,-AlexeiAdolfsen,-Jarle)_bibis.ir.pdf)
 1. an encryption key is not the same as a password, but an encryption key can be derived from a password
