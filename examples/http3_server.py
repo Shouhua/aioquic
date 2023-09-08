@@ -438,6 +438,8 @@ class HttpServerProtocol(QuicConnectionProtocol):
             handler = self._handlers[event.stream_id]
             handler.http_event_received(event)
         elif isinstance(event, DatagramReceived):
+            # NOTICE: HttpRequestHandler没有DatagramReceived相应的处理，直接丢弃
+            # 只有WebTransport支持DatagramReceived这种event处理
             handler = self._handlers[event.flow_id]
             handler.http_event_received(event)
         elif isinstance(event, WebTransportStreamDataReceived):
@@ -445,7 +447,7 @@ class HttpServerProtocol(QuicConnectionProtocol):
             handler.http_event_received(event)
 
     def quic_event_received(self, event: QuicEvent) -> None:
-        if isinstance(event, ProtocolNegotiated):
+        if isinstance(event, ProtocolNegotiated): # alpn协商，tls->alpn_cb->ProtocolNegotiated
             if event.alpn_protocol in H3_ALPN:
                 self._http = H3Connection(self._quic, enable_webtransport=True)
             elif event.alpn_protocol in H0_ALPN:

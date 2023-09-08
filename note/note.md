@@ -1,3 +1,13 @@
+## 2023-09-04
+```python
+# bytes to int
+version = b"\x03\x03"
+int.from_bytes(version, "big")
+# bytes to ascii
+raw_data = b"hello"
+plain_text = raw_data.decode()
+assert plain_text.encode() == raw_data
+```
 ## 2023-08-30
 计算handshake相关密钥，使用的hash包括client hello, server hello, 不包括各自的recored header(5 bytes)
 Tls1.3中计算application相关密钥时候，需要使用header hash，内容包括client hello, server hello, encrypted extension, Certificate, Certificate Verify, Finished, 假设没有CertificateRequest, 不包括各自的record header(5 bytes)

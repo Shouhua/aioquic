@@ -171,8 +171,8 @@ class QuicPacketRecovery:
         self._send_probe = send_probe
 
         # loss detection
-        self._pto_count = 0
-        self._rtt_initial = initial_rtt
+        self._pto_count = 0  # Probe Timeout
+        self._rtt_initial = initial_rtt # 0.1 second
         self._rtt_initialized = False
         self._rtt_latest = 0.0
         self._rtt_min = math.inf
@@ -226,6 +226,7 @@ class QuicPacketRecovery:
 
         return None
 
+    # 默认2个rtt时间
     def get_probe_timeout(self) -> float:
         if not self._rtt_initialized:
             return 2 * self._rtt_initial
@@ -364,6 +365,9 @@ class QuicPacketRecovery:
     def _detect_loss(self, space: QuicPacketSpace, now: float) -> None:
         """
         Check whether any packets should be declared lost.
+        两种方式判断loss：
+        1. 后发送的packet已经收到ack，有个缓冲间隔3个
+        2. 发送时间超过 9/8 * rtt，当前rtt的9/8倍
         """
         loss_delay = K_TIME_THRESHOLD * (
             max(self._rtt_latest, self._rtt_smoothed)

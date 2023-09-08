@@ -384,6 +384,8 @@ async def main(
         _p = urlparse(_p.geturl())
         urls[i] = _p.geturl()
 
+    # 首先处理完connect步骤，比如底层quic协议的Inital...Handshake Finished
+    # 如果是0-RTT，则不需要等待connect中协议完成，具体根据参数zero_rtt判断
     async with connect(
         host,
         port,

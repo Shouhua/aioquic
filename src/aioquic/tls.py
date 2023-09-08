@@ -178,7 +178,8 @@ def hkdf_extract(
     h.update(key_material)
     return h.finalize()
 
-
+# https://cryptography.io/en/latest/hazmat/primitives/asymmetric/serialization/
+# 非对称密钥有多种格式，比如pem, der, openssh等
 def load_pem_private_key(
     data: bytes, password: Optional[bytes] = None
 ) -> Union[dsa.DSAPrivateKey, ec.EllipticCurvePrivateKey, rsa.RSAPrivateKey]:
@@ -924,6 +925,7 @@ class KeySchedule:
             length=self.algorithm.digest_size,
         )
 
+    # extract在每个epoch阶段只是在开始调用，每次调用除去第一次的salt为空外，其他阶段extract的salt都是上一阶段derived得到
     def extract(self, key_material: Optional[bytes] = None) -> None:
         if key_material is None:
             key_material = bytes(self.algorithm.digest_size)
@@ -1023,6 +1025,7 @@ def encode_public_key(
     )
 
 
+# 协商version，group等, offered为对面支持的有优先级的列表
 def negotiate(
     supported: List[T], offered: Optional[List[Any]], exc: Optional[Alert] = None
 ) -> T:
@@ -1036,6 +1039,7 @@ def negotiate(
     return None
 
 
+# 主要是RSA签名算法，要告诉对方RSA签名算法使用了什么padding参数
 def signature_algorithm_params(signature_algorithm: int) -> Tuple:
     if signature_algorithm in (SignatureAlgorithm.ED25519, SignatureAlgorithm.ED448):
         return tuple()
@@ -1089,6 +1093,7 @@ class SessionTicket:
 
     @property
     def obfuscated_age(self) -> int:
+        # 客户端收到session ticket到现在的毫秒数
         age = int((utcnow() - self.not_valid_before).total_seconds() * 1000)
         return (age + self.age_add) % (1 << 32)
 
