@@ -1,3 +1,50 @@
+## 2023-09-14
+### [Sock5协议](https://datatracker.ietf.org/doc/html/rfc1928)
+1. IPv6
+目前环境不支持IPv6，无法测试
+2. close_wait
+```sudo lsof -i:1080```, 原因时被动关闭方(server)，发送完fin，应用程序没有正确检测socket关闭状态导致, 需要合适的时候关闭socket
+3. 解析域名时，需要判断下客户端是否是域名，还是IPv4/IPv6，chrome中的某个插件直接将IPv4/6地址当作域名发送
+4. wireshark会根据端口显示协议，比如使用1080端口，即使不是Socks5协议，也会显示该Socks协议
+
+实现的[Socks5 server](./socks5_server.py), 监听1080, client使用chrome的某插件，配置服务的地址, 如果本地测试udp代理，使用如下文件和工具:  
+- [client](./socks5_client.py), 监听1081
+- [udp echo server](./udp_echo_server.py) 监听9000
+- 启动nc模拟client发送消息到[Socks5 client](./socks5_client.py)   
+```shell
+nc -v -4 -t localhost 1081
+# hello
+# hello
+```
+发送消息后，能看到nc收到echo消息, **Scoks5 client代码里面写死了目的地**
+## 2023-09-11
+### Message Digest
+1. Message digest also known as **cryptographic hashes**
+2. avalanche(雪崩) effect: any change to the message, big or small, must result in an extensive change to the digest  
+3. SHA-2 family, SHA256 is currently the default hash function that's used in the TLS protocol, as well as the default signing function for X.509 and SSH keys.  
+### MAC and HMAC(Hash-based Message Authentication Code)
+1. MAC_function(message, secret_key)  
+2. 相比于Message Digest仅提供完整性(integrity), MAC还提供了不可伪造保护，因为需要密钥(authenticity). 相对于Digital Signature，数字签名还提供了不可否认性，因为使用私钥签名，私钥只在一个人手中  
+### KDF(Key Derivation Function), 代表有PBKDF2, scrypt, HKDF(HMAC-based KDF)等
+1. encryption key和password区别
+Encryption key用于对称加密算法中，一般来说，需要固定长度位数，可读性差; password则相反
+2. KDF takes the following parameters
+IKM(Input Key Material), Salt, Info(Application-specific information), PRF(Pseudorandom Function), Function-specific params(interation count or others(scrypt使用参数)), OKM(Output Key Material) length
+### Asymmetric Encryption and Decryption
+1. a private key and a public key form a **keypair**
+2. Man in the Middle attac(中间人攻击)，提起非对称加密就要提及中间人攻击，密钥运送问题
+3. 非对称加密算法(asymmetric crypto algorithm)有RSA, DSA, ECDSA, DH, ECDH等算法
+### Certificates and TLS
+```shell
+openssl genpkey -algorithm ED448 -out root_keypair.pem
+openssl pkey -pubout -in root_keypair.pem -noout -text
+openssl req -new -subj "/CN=Root CA" -addext "basicConstraints=critical,CA:TRUE" -key root_keypair.pem -out root_csr.pem
+openssl x509 -req -in root_csr.pem -copy_extensions copyall -key root_keypair.pem -days 3650 -out root_cert.pem
+openssl genpkey -algorithm ED448 -out intermediate_keypair.pem
+openssl req -new -subj "/CN=Root CA" -addext "basicConstraints=critical,CA:TRUE" -key intermediate_keypair.pem -out intermediate_csr.pem
+openssl x509 -req -in intermediate_csr.pem -copy_extensions copyall -CA root_cert.pem -CAkey root_keypair.pem -days 3650 -out intermediate_cert.pem
+openssl verify -verbose -show_chain -trusted root_cert.pem intermediate_cert.pem
+```
 ## 2023-09-04
 ```python
 # bytes to int
