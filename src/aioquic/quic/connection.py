@@ -56,6 +56,8 @@ from .stream import FinalSizeError, QuicStream, StreamFinishedError
 
 logger = logging.getLogger("quic")
 
+# 根据协议定义为2^14
+# https://stackoverflow.com/questions/24864501/openssl-ios-buffer-limit
 CRYPTO_BUFFER_SIZE = 16384
 EPOCH_SHORTCUTS = {
     "I": tls.Epoch.INITIAL,
@@ -64,6 +66,7 @@ EPOCH_SHORTCUTS = {
     "1": tls.Epoch.ONE_RTT,
 }
 MAX_EARLY_DATA = 0xFFFFFFFF
+# 用于secret log file中的label值
 SECRETS_LABELS = [
     [
         None,
@@ -79,7 +82,11 @@ SECRETS_LABELS = [
     ],
 ]
 STREAM_FLAGS = 0x07
+# https://github.com/alibaba/xquic/blob/main/docs/translation/rfc9000-transport-zh.md#41-%E6%95%B0%E6%8D%AE%E6%B5%81%E6%8E%A7data-flow-control
+# 流最大id不能超过2^60，因为0-3是特殊的，头2位是可变长度的计算位
 STREAM_COUNT_MAX = 0x1000000000000000
+# https://en.wikipedia.org/wiki/User_Datagram_Protocol
+# UDP header size为8
 UDP_HEADER_SIZE = 8
 
 NetworkAddress = Any
@@ -87,6 +94,7 @@ NetworkAddress = Any
 # frame sizes
 ACK_FRAME_CAPACITY = 64  # FIXME: this is arbitrary!
 APPLICATION_CLOSE_FRAME_CAPACITY = 1 + 2 * UINT_VAR_MAX_SIZE  # + reason length
+# MAX_DATA(connection最多可传输的字节数) and MAX_STREAMS帧(connection最多已关闭流和打开流总数)
 CONNECTION_LIMIT_FRAME_CAPACITY = 1 + UINT_VAR_MAX_SIZE
 HANDSHAKE_DONE_FRAME_CAPACITY = 1
 MAX_STREAM_DATA_FRAME_CAPACITY = 1 + 2 * UINT_VAR_MAX_SIZE
@@ -267,6 +275,8 @@ class QuicConnection:
         self._close_at: Optional[float] = None
         self._close_event: Optional[events.ConnectionTerminated] = None
         self._connect_called = False
+        # https://github.com/alibaba/xquic/blob/main/docs/translation/rfc9001-tls-zh.md
+        # 第二章
         self._cryptos: Dict[tls.Epoch, CryptoPair] = {}
         self._crypto_buffers: Dict[tls.Epoch, Buffer] = {}
         self._crypto_retransmitted = False
@@ -274,6 +284,8 @@ class QuicConnection:
         self._events: Deque[events.QuicEvent] = deque()
         self._handshake_complete = False
         self._handshake_confirmed = False
+        # connection id为一组connection ids，最多8个
+        # 见下面的self._local_active_connection_id_limit = 8
         self._host_cids = [
             QuicConnectionId(
                 cid=os.urandom(configuration.connection_id_length),
@@ -283,6 +295,7 @@ class QuicConnection:
             )
         ]
         self.host_cid = self._host_cids[0].cid
+        # https://github.com/alibaba/xquic/blob/main/docs/translation/rfc9000-transport-zh.md#511-%E5%8F%91%E5%B8%83%E8%BF%9E%E6%8E%A5idissuing-connection-ids
         self._host_cid_seq = 1
         self._local_ack_delay_exponent = 3
         self._local_active_connection_id_limit = 8
@@ -305,6 +318,7 @@ class QuicConnection:
         )
         self._loss_at: Optional[float] = None
         self._network_paths: List[QuicNetworkPath] = []
+        # pacing属于流量控制机制，用于控制数据包发送速率
         self._pacing_at: Optional[float] = None
         self._packet_number = 0
         self._parameters_received = False
@@ -330,6 +344,9 @@ class QuicConnection:
         self._retry_count = 0
         self._retry_source_connection_id = retry_source_connection_id
         self._spaces: Dict[tls.Epoch, QuicPacketSpace] = {}
+        # Spin Bit的作用是提供额外的拥塞信息，以帮助拥塞控制算法更好地调整发送速率。
+        # 当Spin Bit频繁地翻转时，表示数据包在网络中经历了一些拥塞情况，此时拥塞控制算法可以适当减小发送速率。
+        # 相反，如果Spin Bit很少翻转或不翻转，表示网络没有拥塞问题，拥塞控制算法可以增加发送速率。
         self._spin_bit = False
         self._spin_highest_pn = 0
         self._state = QuicConnectionState.FIRSTFLIGHT
@@ -368,6 +385,7 @@ class QuicConnection:
 
         # things to send
         self._close_pending = False
+        # double-ended queue
         self._datagrams_pending: Deque[bytes] = deque()
         self._handshake_done_pending = False
         self._ping_pending: List[int] = []

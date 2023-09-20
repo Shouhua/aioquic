@@ -171,6 +171,8 @@ AEAD_encrypt(AEADObject *self, PyObject *args)
     }
 
     memcpy(self->nonce, self->iv, AEAD_NONCE_LENGTH);
+	// TODO: 1. 不明白为什么要使用nonce的后8个字节去xor
+	// TODO: 2. 不明白为什么使用nonce的高位与pn的低位做xor
     for (int i = 0; i < 8; ++i) {
         self->nonce[AEAD_NONCE_LENGTH - 1 - i] ^= (uint8_t)(pn >> 8 * i);
     }
