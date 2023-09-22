@@ -1,12 +1,12 @@
 import asyncio, ssl, logging, struct, ipaddress
 from asyncio import BaseTransport, Transport, Future, BaseEventLoop
 from enum import IntEnum, Enum
-from typing import Tuple, cast
+from typing import cast
 from dataclasses import dataclass
-from socket import socket, gethostbyname
+from socket import socket, gethostbyname, has_dualstack_ipv6, create_server, AF_INET6
 import signal
 
-host = "0.0.0.0"
+host = "::"
 port = 1081
 
 server_host = "127.0.0.1"
@@ -115,16 +115,14 @@ class Socks5ClientProtocol(asyncio.Protocol):
         password_len = len(password)
         return b"\x01"+user_len.to_bytes(1, byteorder="big")+user_name.encode()+password_len.to_bytes(1, byteorder="big")+password.encode()
     def request(self, command: Command, atyp: AddrType, addr: str, port: int) -> bytes:
-        addr_len = 4
         addr_data = None
         if atyp == AddrType.IPV4:
             addr_data = ipaddress.IPv4Address(addr).packed
         elif atyp == AddrType.IPV6:
-            addr_len = 6
             addr_data = ipaddress.IPv6Address(addr).packed
         else:
-            addr_len = len(addr)
             addr_data = addr.encode()
+        addr_len = len(addr)
         return struct.pack("!BBBBB", VERSION, command, 0, atyp, addr_len) + addr_data + struct.pack("!H", port)
     def check(self, data: bytes):
         if self.phase == Phase.Handshake:
@@ -211,7 +209,12 @@ class Socks5Client(asyncio.Protocol):
     
     def handle_proxy_data(self):
         res = self.proxy.recv(4096)
-        print(f"收到socks5服务器数据: {res.decode()}")
+        if res or len(res) == 0:
+            logger.debug(f"对方关闭socket")
+            self.proxy.close()
+            self.transport.close()
+            return
+        logger.debug(f"收到socks5服务器数据: {res.decode()}")
 
     def data_received(self, data: bytes) -> None:
         """
@@ -233,7 +236,17 @@ async def main():
         ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_3
         # ssl_ctx.load_verify_locations(cafile="server_ca.pem")
 
-    server = await loop.create_server(Socks5Client, host, port, ssl=ssl_ctx)
+    try:
+        addr = (host, port)
+        if has_dualstack_ipv6():
+            s = create_server(addr, family=AF_INET6, dualstack_ipv6=True)
+        else:
+            s = create_server(addr)
+        server = await loop.create_server(Socks5Client, sock=s, ssl=ssl_ctx, reuse_address=True, reuse_port=True)
+    except Exception as e:
+        logger.error(f"新建server出问题: {e}")
+        exit(-1)
+
     print(f"socks5服务器监听: {host}:{port}")
     if open_ssl:
         print(f"开启TLS1.3模式")
@@ -246,7 +259,7 @@ def handle_signal_int(sig_num, _):
 if __name__ == "__main__":
     logging.basicConfig(
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        level=logging.INFO
+        level=logging.DEBUG
     )
     logger = logging.getLogger('socks5_client')
     signal.signal(signal.SIGINT, handle_signal_int)

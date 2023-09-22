@@ -1,11 +1,23 @@
 ## 2023-09-14
 ### [Sock5协议](https://datatracker.ietf.org/doc/html/rfc1928)
-1. IPv6
-目前环境不支持IPv6，无法测试
-2. close_wait
+1. [支持IPv6 and IPv4 dual stack](https://stackoverflow.com/questions/1618240/how-to-support-both-ipv4-and-ipv6-connections)
+The best approach is to create an IPv6 server socket that can also accept IPv4 connections. To do so, create a regular IPv6 socket, turn off the socket option IPV6_V6ONLY, bind it to the "any" address, and start receiving. IPv4 addresses will be presented as IPv6 addresses, in the IPv4-mapped format.  
+The major difference across systems is whether IPV6_V6ONLY is a) available, and b) turned on or off by default. It is turned off by default on Linux (i.e. allowing dual-stack sockets without setsockopt), and is turned on on most other systems.  
+In addition, the IPv6 stack on Windows XP doesn't support that option. In these cases, you will need to create two separate server sockets, and place them into select or into multiple threads.
+```python
+addr = (host, port)
+if socket.has_dualstack_ipv6():
+     s = socket.create_server(addr, family=AF_INET6, dualstack_ipv6=True)
+else:
+     s = socket.create_server(addr)
+server = await loop.create_server(Socks5Protocol, sock=s, ssl=ssl_ctx, reuse_address=True, reuse_port=True)
+```
+2. CLOSE_WAIT状态连接
 ```sudo lsof -i:1080```, 原因时被动关闭方(server)，发送完fin，应用程序没有正确检测socket关闭状态导致, 需要合适的时候关闭socket
 3. 解析域名时，需要判断下客户端是否是域名，还是IPv4/IPv6，chrome中的某个插件直接将IPv4/6地址当作域名发送
 4. wireshark会根据端口显示协议，比如使用1080端口，即使不是Socks5协议，也会显示该Socks协议
+5. [IPv6中"::"和"::1"的区别](https://superuser.com/questions/1727006/what-is-the-difference-between-ipv6-addresses-and-1)
+::1相当于localhost，::相当于0.0.0.0
 
 实现的[Socks5 server](./socks5_server.py), 监听1080, client使用chrome的某插件，配置服务的地址, 如果本地测试udp代理，使用如下文件和工具:  
 - [client](./socks5_client.py), 监听1081
