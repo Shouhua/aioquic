@@ -83,6 +83,9 @@ class QuicServer(asyncio.DatagramProtocol):
         protocol = self._protocols.get(header.destination_cid, None)
         original_destination_connection_id: Optional[bytes] = None
         retry_source_connection_id: Optional[bytes] = None
+        # https://datatracker.ietf.org/doc/html/rfc9000#name-address-validation-during-c
+        # client必须发送大于1200字节的initial包，这样server可以发送更多字节信息的包，因为quic的安全考虑，在验证客户端地址之前，服务端发送的字节数不得（MUST NOT）超过它们接收到的字节数的三倍
+        # 以下为路径验证
         if (
             protocol is None
             and len(data) >= 1200

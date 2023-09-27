@@ -1,3 +1,63 @@
+## 2023-09-27
+### [TLS1.3 vector编码](https://datatracker.ietf.org/doc/html/rfc8446#section-3.4)
+在使用HKDF计算时，其中的label需要按照[文档](https://datatracker.ietf.org/doc/html/rfc8446#section-7.1)编码，很容易错误是对于变长字段不添加长度前缀，这个在文档的3.4章有提及，太隐晦○|￣|_
+```
+HKDF-Expand-Label(Secret, Label, Context, Length) =
+            HKDF-Expand(Secret, HkdfLabel, Length)
+
+Where HkdfLabel is specified as:
+
+struct {
+     uint16 length = Length;
+     opaque label<7..255> = "tls13 " + Label;
+     opaque context<0..255> = Context;
+} HkdfLabel;
+
+Derive-Secret(Secret, Label, Messages) =
+     HKDF-Expand-Label(Secret, Label,
+                    Transcript-Hash(Messages), Hash.length)
+```
+其中的label和context属于变长字段(使用<floor..ceiling>指定的vector), 编码时需要添加长度前缀, 例如下面例子
+```python
+from struct import pack
+
+label = b"tls13 " + b"quic iv"
+context = b"\x01\x02\x03\x04\x05\x06"
+length = 32
+
+hkdf_label = pack(">H", length) \
+          + pack("B", len(label)) + label \
+          + pack("B", len(context)) + context
+print(hkdf_label)
+```
+### octet VS octal
+- octet: 就是一个字节的意思，因为byte在某些场景不一定指定8位一组，有些场景引起混淆的地方就使用octet更严谨，比如[TLS1.3 RFC](https://datatracker.ietf.org/doc/html/rfc8446)
+- octal: 代表八进制
+### hexdump, xxd
+1. KB and K(KiB)  
+hexdump可以使用K或者KiB代表1024字节，K代表1000字节
+2. Format and Color in HEXDUMP
+```shell
+hexdump -e '"%08_Ax_L[cyan]\n"' -e '"%08_ax_L[cyan]  " 8/2 "%04x_L[green:0x6f72@0-1,!red:0x6f72@0-1] " "  |"' -e '16/1 "%_p" "|" "\n"' -n 64 /etc/passwd
+```
+3. xxd和hexdump分场景使用，hexdump支持定制，功能更丰富，但是简单场景xxd似乎更适合点 :)
+```shell
+echo -en "tls13 $label" | hexdump -v -e '/1 %02x'
+echo -en "tls13 $label" | xxd -p
+```
+### [fprintf format string](https://cplusplus.com/reference/cstdio/fprintf/)
+```
+%[flags][width][.precision][length]specifier
+flags: + - 0 #(0x, 0前缀)
+
+printf "%08.3x" 7  -> _____007
+printf "%-08.3x" 7 -> 007_____
+
+flags: 0 表示不足长度8使用0填充
+width: 8 表示最长长度为8
+precision: 3 使用x时，precision表示最短长度
+specifier: x 表示使用16进制表示
+```
 ## 2023-09-14
 ### [Sock5协议](https://datatracker.ietf.org/doc/html/rfc1928)
 1. [支持IPv6 and IPv4 dual stack](https://stackoverflow.com/questions/1618240/how-to-support-both-ipv4-and-ipv6-connections)

@@ -14,6 +14,8 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
     ):
         loop = asyncio.get_event_loop()
 
+        # asyncio.Event主要用于同步，应用场景简单，https://docs.python.org/3/library/asyncio-sync.html#asyncio.Event
+        # asyncio.Future https://docs.python.org/3/library/asyncio-future.html，应用场景多样化，此处_connected_waiter可能被terminated有多种原因，所以使用Future
         self._closed = asyncio.Event()
         self._connected = False
         self._connected_waiter: Optional[asyncio.Future[None]] = None
