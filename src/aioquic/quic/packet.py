@@ -271,7 +271,7 @@ class QuicTransportParameters:
     original_destination_connection_id: Optional[bytes] = None
     max_idle_timeout: Optional[int] = None
     stateless_reset_token: Optional[bytes] = None
-    max_udp_payload_size: Optional[int] = None
+    max_udp_payload_size: Optional[int] = None # 0 不支持datagram frame type
     initial_max_data: Optional[int] = None
     initial_max_stream_data_bidi_local: Optional[int] = None
     initial_max_stream_data_bidi_remote: Optional[int] = None
@@ -283,6 +283,7 @@ class QuicTransportParameters:
     disable_active_migration: Optional[bool] = False
     preferred_address: Optional[QuicPreferredAddress] = None
     active_connection_id_limit: Optional[int] = None
+    # https://github.com/alibaba/xquic/blob/main/docs/translation/rfc9000-transport-zh.md#73-%E8%AE%A4%E8%AF%81%E8%BF%9E%E6%8E%A5idauthenticating-connection-ids
     initial_source_connection_id: Optional[bytes] = None
     retry_source_connection_id: Optional[bytes] = None
     max_datagram_frame_size: Optional[int] = None

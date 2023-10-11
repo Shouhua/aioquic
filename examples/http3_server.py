@@ -577,6 +577,8 @@ if __name__ == "__main__":
     configuration = QuicConfiguration(
         alpn_protocols=H3_ALPN + H0_ALPN + ["siduck"],
         is_client=False,
+        # https://github.com/alibaba/xquic/blob/main/docs/translation/rfc9221-datagram-zh.md
+        # 告知对端支持datagram frame type
         max_datagram_frame_size=65536,
         quic_logger=quic_logger,
         secrets_log_file=secrets_log_file,

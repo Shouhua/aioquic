@@ -30,7 +30,6 @@ env | grep LC_NAME # LC_NAME="zh_CN.UTF-8" 当前shell全局变量已经在上�
 ```shell
 *** WARNING *** The locale specified by the environment affects sort order. Set LC_ALL=C to get the traditional sort order that uses native byte values.
 ```
-
 ### shell中有趣的问题
 ```shell
 A="hello" echo $A # 空
@@ -87,7 +86,6 @@ now = datetime.now()
 now.strftime("%Y-%m-%e") # 2023-10-11
 datetime.strptime("2020-10-11", "%Y-%m-%d") # datetime.datetime(2020, 10, 11, 0, 0)
 ```
-
 ## 2023-10-09
 ### [BRE and ERE](https://www.gnu.org/software/sed/manual/sed.html#BRE-vs-ERE)
 Basic and extended regular expressions are two variations on the syntax of the specified pattern. Basic Regular Expression (BRE) syntax is the default in sed (and similarly in grep). Use the POSIX-specified -E option (-r, --regexp-extended) to enable Extended Regular Expression (ERE) syntax.
@@ -118,6 +116,10 @@ With basic (BRE) syntax, these characters do not have special meaning unless pre
 (echo "hello";seq 10 | awk 'BEGIN { ORS = "" } { print }';echo -ne "\nwo\u00b7ld123\n") | sed -n '/[[:digit:]]\+$/l 3'
 ```
 
+## 2023-09-29
+### quic加解密用到的cid
+1. **计算密钥时要用到的cid，如果没有retry packet的话，使用client发送的最初initial packetd中的destination cid。如果发生retry，则在下次client initial packet中使用这个scid作为dcid，并且server和client都以此作为加解密使用的cid。** retry packet中的source cid必须是自己选择的，不能与前面的client initial packet中的destination cid相同，这个跟version negotiation不同
+2. [version negotiation destination cid和source cid必须跟client initial packet中的source cid和destination cid保持一致](https://github.com/alibaba/xquic/blob/main/docs/translation/rfc9000-transport-zh.md#1721-%E7%89%88%E6%9C%AC%E5%8D%8F%E5%95%86%E5%8C%85version-negotiation-packet)
 ## 2023-09-27
 ### [TLS1.3变长字段编码](https://datatracker.ietf.org/doc/html/rfc8446#section-3.4)
 在使用HKDF计算时，其中的label需要按照[文档](https://datatracker.ietf.org/doc/html/rfc8446#section-7.1)编码，很容易错误是对于变长字段不添加长度前缀，这个在文档的3.4章有提及，太隐晦○|￣|_
