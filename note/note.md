@@ -1,5 +1,125 @@
+## 2023-10-11
+### [locale](https://wiki.archlinuxcn.org/wiki/Locale)
+locate categories: LC_COLLATE, LC_TIME, LC_MESSAGES, LC_NAME<br>
+locale keys: name_fmt<br>
+```shell
+locale # 查看所有locale categores和LC_ALL, LANG, LANGUAGE
+# locale -k [category|key]
+locale -k LC_NAME
+locale -k name_fmt
+```
+1. LC_ALL一般不设置，用于在命令行中临时设置控制程序行为，比如用于使用原生C类型排序时，`LC_ALL=C sort file.txt`
+2. env环境变量中都是有值的键值对，LC_*, LANGUAGE, LANG如果没有被设置，env没有相应的变量；尽管使用`locale`命令都会显示出来，特别是LC_*(LC_ALL除外)，有个规则
+如果LC_\*不存在，则使用LANG的值填充，这就是为什么命令`locale`结果中LC_\*有的值没有对应环境变量，[如果LANG也没有值，则值为"POSIX"](https://unix.stackexchange.com/questions/449318/how-does-the-locale-program-work) and [here](https://unix.stackexchange.com/questions/449318/how-does-the-locale-program-work)
+```shell
+LANG= locale | grep 'POSIX'
+```
+3. **如果env中不存在值，那就被设置为局部变量，比如：假设LC_COLLATE不存在env中，那就无法被子shell继承，并且无法对使用改环境变量的命令产生影响**
+```shell
+env | grep LC_COLLATE # 空 LC_COLLATE不存在
+locale | grep LC_COLLCATE # LC_COLLCATE="en_US.UTF-8" 因为LANG="en_US.UTF-8" 
+LC_COLLATE="zh_CN.UTF-8" ; locale | grep LC_COLLATE # LC_COLLATE="en_US.UTF-8", 因为LC_COLLATE不存在env中，设置只是局部变量，无法影响全局
+env | grep LC_COLLATE # 空 LC_COLLATE不存在
+
+env | grep LC_NAME # LC_NAME=en_US.UTF-8
+locale | grep LC_NAME # LC_NAME="en_US.UTF-8"
+LC_NAME="zh_CN.UTF-8" ; locale | grep LC_NAME # LC_NAME="zh_CN.UTF-8", 因为LC_NAME存在env中，设置改变了当前shell全局
+env | grep LC_NAME # LC_NAME="zh_CN.UTF-8" 当前shell全局变量已经在上一步改变了
+```
+4. [类型C或者POSIX会使用ascii char set, 都转化成127字节进行操作，机器可读](https://askubuntu.com/questions/801933/what-does-c-in-lc-all-c-mean) and [here](https://unix.stackexchange.com/questions/87745/what-does-lc-all-c-do)，还有[sort manual中描述](https://man7.org/linux/man-pages/man1/sort.1.html)
+```shell
+*** WARNING *** The locale specified by the environment affects sort order. Set LC_ALL=C to get the traditional sort order that uses native byte values.
+```
+
+### shell中有趣的问题
+```shell
+A="hello" echo $A # 空
+A="hello"; echo $A # hello
+# 原因是第一行中因为bash运行前先展开变量，使用 ; 表示语句分隔符
+A="hello" bash -c 'echo $A' # hello 使用单引号，不会在运行前展开变量, 并且A会临时加入到env环境变量中，当前语句执行结束会一处，这个时候bash -c新开进程会继承A环境变量，只要执行不展开就ok
+A="hello" bash -c "echo $A" # 空
+A="hello"; bash -c 'echo $A' # 空, bash -c会新建进程执行，这个时候不会继承A变量, 除非A是全局环境变量
+
+# 假设当前环境变量LC_NAME=zh_CN.UTF-8
+LC_NAME=en_US.UTF-8 env | grep LC_NAME # LC_NAME=en_US.UTF-8 设置LC_NAME到当前的环境变量，不对其他任何环境产生影响
+env | grep LC_NAME # LC_NAME=zh_CN.UTF-8
+LC_NAME=en_US.UTF-8; env | grep LC_NAME # LC_NAME=en_US.UTF-8 设置当前环境变量LC_NAME, 
+env | grep LC_NAME # LC_NAME=en_US.UTF-8
+LC_NAME=zh_CN.UTF-8 # 还原
+LC_NAME=C && locale | grep 'LC_NAME' # LC_NAME=en_US.UTF-8 效果跟上面一样，但是意义不同，首先修改环境变量，成功后在执行后面语句
+```
+1. **bash -c会新建进程处理，pipe符号 `|` 也有类似流程**
+2. [空格和`;`在定义环境变量中的区别](https://unix.stackexchange.com/questions/36745/when-to-use-a-semi-colon-between-environment-variables-and-a-command)
+
+### 有趣的sort
+```shell
+# 结果：A/nB/na/n/b/n
+echo -e 'a\nb\nA\nB\n' | LC_COLLATE=C sort
+# 注意$'str'和$""区别
+sort <<< $'a\nb\nA\nB\n' 
+# 结果：a/nA/n/b/nB/n
+echo -e 'a\nb\nA\nB\n' | LC_COLLATE=en_US.UTF-8 sort
+```
+1. sort默认根据LC_COLLATE比较, 比如en_US，根据字符比较，看起来像不区分大小写字符比较，但是**C会转化为字节后比较**
+2. 其中shell中`<<<`代表[here string](https://www.gnu.org/software/bash/manual/bash.html#Here-Strings)，`<<`表示here document<br>
+3. [\$'\x31' vs \$"\x31"](https://unix.stackexchange.com/questions/48106/what-does-it-mean-to-have-a-dollarsign-prefixed-string-in-a-script) \$'str'转义字符串，类似echo -e；$"str"用于根据locale翻译str
+
+### [datetime fromat](https://man7.org/linux/man-pages/man3/strftime.3.html)
+1. 文档中提及的[`broken-down time`](https://www.gnu.org/software/libc/manual/html_node/Broken_002ddown-Time.html), 表示将年月日等信息单独出来的二进制，人类友好可阅读，使用 `struct tm` 表示; 机器使用[time_t](https://www.gnu.org/software/libc/manual/html_node/Time-Types.html)表示，表示距离1970-1-1 00:00:00 UTC的秒数
+2. ctime操作(transform date and time to broken-down time or ASCII)可以查看[文档](https://man7.org/linux/man-pages/man3/ctime.3.html)
+```C
+char *asctime(const struct tm *tm);
+struct tm * localtime (const time_t *time)
+time_t mktime(struct tm *tm);
+
+// 给定tm结构按照format输出到s
+size_t strftime(char s[restrict .max], size_t max,
+               const char *restrict format,
+               const struct tm *restrict tm);
+
+char *strptime(const char *restrict s, const char *restrict format,
+               struct tm *restrict tm);
+```
+其中format转义字符大部分其他语言都遵守这个规则，比如python，使用python调试这些更方便
+```python
+from datetime import datetime
+now = datetime.now()
+now.strftime("%Y-%m-%e") # 2023-10-11
+datetime.strptime("2020-10-11", "%Y-%m-%d") # datetime.datetime(2020, 10, 11, 0, 0)
+```
+
+## 2023-10-09
+### [BRE and ERE](https://www.gnu.org/software/sed/manual/sed.html#BRE-vs-ERE)
+Basic and extended regular expressions are two variations on the syntax of the specified pattern. Basic Regular Expression (BRE) syntax is the default in sed (and similarly in grep). Use the POSIX-specified -E option (-r, --regexp-extended) to enable Extended Regular Expression (ERE) syntax.
+
+In GNU sed, the only difference between basic and extended regular expressions is in the behavior of a few special characters: ‘?’, ‘+’, parentheses, braces (‘{}’), and ‘|’.
+
+With basic (BRE) syntax, these characters do not have special meaning unless prefixed with a backslash (‘\’); While with extended (ERE) syntax it is reversed: these characters are special unless they are prefixed with backslash (‘\’).
+
+| Desired pattern | Basic (BRE) Syntax | Extended (ERE) Syntax |
+| -- | ---- | ---- |
+|literal ‘+’ (plus sign)|```$ echo 'a+b=c' > foo <br/>```<br>```$ sed -n '/a+b/p' foo a+b=c```| ```$ echo 'a+b=c' > foo```<br>```$ sed -E -n '/a\+b/p' foo a+b=c```|
+|One or more ‘a’ characters followed by ‘b’ (plus sign as special meta-character)| ```$ echo aab > foo```<br>```$ sed -n '/a\+b/p' foo aab```|```$ echo aab > foo```<br>```$ sed -E -n '/a+b/p' foo aab```|
+### man 1 printf
+`printf "%s\n" abode bad bed bit bid byte body` 会将后面的arguments执行7次，得到结果: `abode\nbad\nbed\nbit\nbid\nbyte\nbody\n`
+### [awk redirect](https://www.gnu.org/software/gawk/manual/gawk.html#Redirection)
+`netstat -t | awk 'NR != 1 && NR != 2 { print > $6 }'`<br>
+这里的 **>** 与shell种的redirect行为不同，这里是append，详见上面链接文档
+### sed有趣的指令
+- [pattern space and hold space](https://www.gnu.org/software/sed/manual/sed.html#advanced-sed)
+- n 跳过当前行, 类似awk中的`next`命令
+- `N` `pattern_space += '\n' + next_line`
+- `l n` 打印pattern space，可以打印不可见字符, n表示多少字符后换行
+```shell
+# | 的优先级(precedence)比 ; 高
+# \u00b7 middle dot
+# basic regular expression ? + () {} | 需要转移
+# [[:alpha:]] [[:alnum:]] [[:digit:]] [0-9]
+(echo "hello";seq 10 | awk 'BEGIN { ORS = "" } { print }';echo -ne "\nwo\u00b7ld123\n") | sed -n '/[[:digit:]]\+$/l 3'
+```
+
 ## 2023-09-27
-### [TLS1.3 vector编码](https://datatracker.ietf.org/doc/html/rfc8446#section-3.4)
+### [TLS1.3变长字段编码](https://datatracker.ietf.org/doc/html/rfc8446#section-3.4)
 在使用HKDF计算时，其中的label需要按照[文档](https://datatracker.ietf.org/doc/html/rfc8446#section-7.1)编码，很容易错误是对于变长字段不添加长度前缀，这个在文档的3.4章有提及，太隐晦○|￣|_
 ```
 HKDF-Expand-Label(Secret, Label, Context, Length) =
