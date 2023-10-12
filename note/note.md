@@ -1,3 +1,54 @@
+## 2023-10-12
+### 查看标准C库头文件的man page，安装manpage-posix-dev
+```shell
+sudo apt install manpage-posix-dev
+man sys_time.h # sys/time.h
+man time.h
+```
+### libc datetime
+```c
+// sys/time.h
+struct timeval {
+     time_t tv_sec;        // seconds
+     suseconds_t tv_usec; // microseconds
+};
+int gettimeofday(struct timeval *, void *);
+
+// time.h
+time_t now = time(NULL); // time_t seconds from epoch(1970-1-1 00:00:00)
+struct tm {
+     int tm_sec;  // [0, 60] leap second, 有可能有闰秒
+     int tm_min;  // [0, 59]
+     int tm_hour; // [0, 23]
+     int tm_mday; // day of month[1,31]
+     int tm_mon;  // month of year[0, 11]
+     int tm_year; // years since 1900
+     int tm_wday; //day of week[0-6] sunday=0
+     int tm_yday; // day of year [0-365]
+     int tm_iddst; // daylight savings flags, 据说linux平台一直为0(没有)(-1不知道，1使用)
+     long int tm_gmtoff; // 距离utc的秒数
+};
+char *asctime(const struct tm *tm); // Thu Oct 12 14:51:17 2023
+struct tm *localtime(const time_t *timep);
+struct tm *gmtime(const time_t *timep);
+
+time_t mktime(struct tm *tm);
+// 1. 一般使用如下方式获取时区offset
+tzset();
+time_t now = time(NULL);
+local = mktime(localtime(now));
+std = mktime(gmtime(now));
+diff = std - local;  // offset seconds
+// 这个有个前提，如果使用localtime_r或者gmtime_r需要手动调用tzset()要设置下, 无论什么都可以先调用下
+// 2. 还可以通过标准库中全局变量获取, [man tzset](https://man7.org/linux/man-pages/man3/tzset.3.html)
+extern long timezone;
+extern char *tzname[2];
+extern int daylight;
+tzset();
+printf("The time zone is '%ld's\n", timezone);
+printf("The time zone is '%s'\n", *tzname);
+printf("The daylight is '%d'\n", daylight);
+```
 ## 2023-10-11
 ### [locale](https://wiki.archlinuxcn.org/wiki/Locale)
 locate categories: LC_COLLATE, LC_TIME, LC_MESSAGES, LC_NAME<br>
