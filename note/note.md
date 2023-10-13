@@ -1,3 +1,29 @@
+## 2023-10-13
+### URI
+`scheme(protocol) name/password host port path query fragment`<br>
+`https://user:pass@example.com:9090/list?start=3#content`
+### build curl
+```shell
+./configure --with-openssl --prefix=$HOME/curl
+PKG_CONFIG_PATH=$HOME/curl/lib/pkgconfig pkg-config --libs --cflags libcurl
+```
+### html
+1. url-encoding 也叫 percent-encoding
+2. form tag默认的enctype为application/x-www-form-urlencoded(curl -d)，也可以改为enctype=multi/form-data(curl -F)
+### curl command line use
+```shell
+# only show response header
+curl -I http://example.com
+# only show request and response header
+curl -v -I http://example.com
+# show request conent data
+curl --trace curl.log -d "name=john" http://example.com
+# -d 默认设置Content-Type: application/x-www-form-urlencoded 使用POST传递数据-d时，需要修改type，比如-H "application/json"
+curl -d "name=john" -H "application/json" http://example.com 
+# -c file 存储cookie到file，-b [data/file] 读取cookie
+curl -c cookies -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" https://www.baidu.com
+curl -c cookies -b cookies http://www.baidu.com
+```
 ## 2023-10-12
 ### 查看标准C库头文件的man page，安装manpage-posix-dev
 ```shell
