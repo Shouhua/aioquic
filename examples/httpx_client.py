@@ -38,6 +38,7 @@ class H3Transport(QuicConnectionProtocol, httpx.AsyncBaseTransport):
         self._read_queue: Dict[int, Deque[H3Event]] = {}
         self._read_ready: Dict[int, asyncio.Event] = {}
 
+    # httpx.AsyncBaseTransport必须要覆写的方法
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         assert isinstance(request.stream, httpx.AsyncByteStream)
 
