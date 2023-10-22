@@ -15,12 +15,14 @@
 ### Simple Commands
 **[A simple command is just a sequence of words seperated by blanks, terminated by one of the shell's control operators](https://www.gnu.org/software/bash/manual/bash.html#Simple-Commands)**，写的真好，定义了分割语句的规则
 
-### Grouping Commands
+### Compound Commands
+1. Looping Constructs<br>
+`for (( expr1; expr2; expr3; )); do commands; done`
+2. Conditional Constructs<br>
+**`(( expression ))`跟`$(( expression ))`区别，通俗讲前者在执行命令，可以放在shell脚本中单独一行，后者常用语赋值语句或者double quote中；有3中方式执行arithmetic：`(( expression ))`, `let expr1 expr2`, `delcare -i name=expression`**
+3. Grouping Commands<br>
 - `( list )` create **subshell** to execute list
 - `{ list; }` the semicolon following list is required
-
-### Coprocesses
-TODO
 
 ## Shell Functions
 1. syntax
@@ -61,6 +63,9 @@ IFS=A; set -- helloAworld again; echo "$*" # "helloAworldAagain"
 # "$@"="$1" "$2"
 IFS=A; set -- helloAworld again; echo "$@" # "helloAworld" "again"
 ```
+- `"$@"`还有个特殊情况，自动把首位和尾部join起来，比如[`set -- "ted carol" "alice bob"; printf "%s\n" "hello $@ world"`](https://stackoverflow.com/questions/27808730/word-splitting-happens-even-with-double-quotes)，这里对应了文档里面的一句话，
+[`If the double-quoted expansion occurs within a word, the expansion of the first parameter is joined with the beginning part of the original word, and the expansion of the last parameter is joined with the last part of the original word`](https://www.gnu.org/software/bash/manual/bash.html#Positional-Parameters)
+
 IFS默认值为space, tab, newline
 ```shell
 declare -p IFS # 查看IFS变量定义
@@ -79,3 +84,159 @@ IFS="A"; for v in $@; do echo $v; done
 # $0 shell脚本名称
 ```
 ## Shell Expansion
+there are seven kinds of expansion performed:
+- brace expansion
+- tidle expansion
+- parameter and variable expansion
+- arithmetic expansion
+- process substitution(*)
+- command substitution
+- word splitting
+- filename expansion
+
+### Brace Expansion
+```shell
+bash -c 'echo a{b,c,d}e'
+# {x..y[..incr]} x and y are either int or letters, incr int
+bash -c 'echo {z..h..-2}'
+bash -c 'echo /usr/{ucb/{ex,edit},lib/{ex?.?*,how_ex}}' # /usr/ucb/ex /usr/ucb/edit /usr/lib/ex?.?* /usr/lib/how_ex
+```
+
+### tidle expansion
+```
+~ = $HOME
+~+ = $PWD
+~- = $OLDPWD
+~fred/foo The subdirectory foo of the home directory of the user fred
+```
+
+### shell parameter expansion
+syntax: ${parameter}, ${!parameter} indirect expansion, except ${!prefix*} and ${!name[@]}
+```bash
+var=hello hello=world; echo ${!var} # world
+echo ${!LC*} # print all LC prefixed variable
+declare -A arr=([name]=James [age]=38); echo ${!arr[@]} # print array keys
+```
+
+1. 变量测试替换，如果有 ":" 表示除了测试variable 是不是unset的状态外，还要测试是否为null
+```bash
+var="hello"; echo ${var-unset} # hello
+var=;: ${var:=DEFAULT}; echo $var # DEFAULT
+var=;: ${var:?var is unset or null} # bash: var: var is unset or null
+var=123; echo ${var:+var is set and not null} # var is set and not null
+```
+**NOTE: `":"` [POSIX builtin，代表true，true是`/usr/bin/true`，会忽略所有参数，但是参数会各种expansion，返回0, 这里可以快速的执行 parameter expansion而不用其他操作](https://stackoverflow.com/questions/3224878/what-is-the-purpose-of-the-colon-gnu-bash-builtin)**  
+
+还可以变相的使用上述实现测试变量是否为unset或者null
+```bash
+# [[ -e var ]]
+if [[ ${var:1} -eq 1 ]]; then echo "var is not set"; else echo "var is set"; fi;
+```
+
+2. 变量substring expansion
+syntax: 
+- `${parameter:offset[:length]}`, 截取变量值
+- `${!prefix@} ${!prefix*}`, 返回以prefix开头的变量名称列表
+- `${!name[@]} ${!name[*]}`, 返回keys of indexed or associated array
+- `${#parameter}`, 返回变量值长度
+- `${parameter#word} ${parameter##word}`, 删除变量值以word匹配的开头部分, # 最短匹配 ## 最长匹配
+- `${parameter%word} ${parameter%%word}`, 删除变量值以word匹配的结尾部分, % 最短匹配 %% 最长匹配
+- `${parameter/pattern/string} ${parameter//pattern/string}`, 替换变量值里面pattern匹配的地方, / 匹配第一处 // 全局替换 
+- `${parameter/#pattern/string} ${parameter/%pattern/string}`, 变量值匹配开头/尾部pattern
+- `${parameter^pattern} ${parameter^^pattern}`, 匹配pattern部分大写，如果没有pattern, 大写首字母或者全部大写
+- `${parameter,pattern} ${parameter,,pattern}`, 匹配pattern部分小写，如果没有pattern, 小写首字母或者全部小写
+- [${parameter@operator}](https://stackoverflow.com/questions/40732193/bash-how-to-use-operator-parameter-expansion-parameteroperator), 根据operator操作值
+
+### Command Substitution
+syntax: `$(command)` or `` `command` ``
+
+**use \$(< file) instead of \$(cat file), because the former is faster**
+
+### Arithmetic Expansion
+syntax: `$(( expression ))`
+
+### [Process Substitution](https://tldp.org/LDP/abs/html/process-sub.html)
+看文档主要是如果需要从多个进程读取为输入，可以使用这种方式，比如：comm, diff等，当然如果只有一个也是能胜任的
+```bash
+while read line;do
+  let num2+=1
+  echo $num2: $line
+done < <(sleep 10; grep 'UUID' /etc/fstab)
+```
+## Redirections
+&>fd equals to >fd 2>&1
+
+### here document
+```bash
+eval $'cat <<-"EOF" > test.txt\n\thome:$OLDPWD\nEOF'
+```
+1. **如果EOF有引号，内容不会展开 test.txt内容为home: $HOME;**
+2. **<<-会清除leading spaces**
+
+### here string
+`cat <<< ~ # /home/shouhua`
+
+## Executing Commands
+### simple command expansion(https://www.gnu.org/software/bash/manual/bash.html#Simple-Command-Expansion)
+1. 先保存variable assignment和redirections
+2. 其余部分各种expansion，确定command and arguments
+3. perform redirections
+4. 对赋值语句的value执行各种expansion
+5. execute command，shell func, builtins, $PATH
+6. execute env
+
+### Command Search and Execution
+查找command顺序
+1. 如果没有没有包括slash, 查找shell function
+2. shell builtin
+3. $PATH
+4. shell
+
+## Bourne Shell Builtins
+- `: [arguments]` alway return zero, do nothing beyond expanding arguments and performing redirections
+- `brean [n]` or `continue [n]` n>=1 默认n=1，如果n>1，用于退出第n层loop，从当前层开始
+- `trap [-lp] [arg] [sigspec ...]`
+## Bourne-Again Shell Builtins
+- `declare [-aAfFgiIlnrtux] [-p] [name[=value] ...]` -r readonly, -i integer, -a array, -f function, -x exportable.
+
+```
+-a indexed array
+-A associated array
+-f function name only
+-i integer
+-l convert value to lowercase
+-n nameref
+-r readonly
+-u convert value to uppercase
+-x export variable
+```
+- `type [-afptP] [name ...]` `-t` print single word which is one of 'alias', 'fucntion', 'builtin', 'file' or 'keyworkd'
+
+## Modify Shell Behavior
+### set
+1. change value of shell options
+2. set the positional parameters
+3. display the names and values of shell variables
+
+## Bash Variables
+- BASHPID, BASHCOMMAND, BASH_LINENO
+
+## NOTE
+1. 条件语句比如if，else等，条件测试返回0时进入if，其他进入else
+2. -v varname 测试var是否set，还可以使用parameter expansion判断
+if [[ -z ${varname+x} ]]; then echo "varname is unset"; else echo "varname is ${varname}"; fi
+${varname:+x} vs ${varname+x} 相同点是只有当varname被set时才会使用x调换，否则为varname；":"除了test unset外，还会test是否为空
+3. IFS=A; set -- helloAworld again; echo $@
+还是要注意，每个语句赋值前都会经历parameter expansion等转化，如果使用语句
+IFS=A echo $@ $@在展开时使用的IFS还是原先的IFS，因为这个时候，赋值语句还没有生效，这种转化是每句语句，跟是否一个进程没有关系;
+var=hello && echo $var # &&是control operator
+shell commands里面介绍了simple command的分类，&& 后面应该会重新走command expansion流程(https://www.gnu.org/software/bash/manual/bash.html#Shell-Operation)
+4. sleep 60s 会生成新的sleep进程，可以使用ps -ef | grep [pid] 查看
+5. set -o [emacs|vi] # command line editting
+6. cat -A -n < /etc/passwd
+7. here string 可以代替管道前的echo
+grep "llo" <<< "hello world"
+8. IFS 
+1). 在变量替换 (扩展)、命令替换 (扩展)、算术替换 (扩展) 时，如果它们的结果没有使用引号包围，则尝试使用 IFS 将结果进行单词划分
+2). 在 read 命令中，根据 IFS 将所读取的内容划分为单词分别赋值给指定的变量
+9. bash执行进度动画 https://www.junmajinlong.com/shell/shell_perl_gif/
