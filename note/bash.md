@@ -33,7 +33,7 @@ function fname [()] compound-command [ redirections ]
 ```
 2. scope
 - 默认function里面的变量，调用函数后，函数外是能访问到的
-- local声明的变量，只在自己和子函数中可见
+- local声明的变量，只在自己和子函数中可见; **在函数中使用declare声明变量可以只能在本函数中使用, 详见declare解释中举例说明**
 3. return
 正常情况下，函数的返回状态是最后一个命令的exit status；如果有`return [number]`则为number，如果return的其他类型，则还是最后一个命令的exit status
 
@@ -55,24 +55,27 @@ shift [n] # 左移n个参数，参数会被重新赋值，比如shift 2后，$1'
 - `$*`和`$@`都是根据IFS划分传入的参数
 - `"$*"`根据IFS的第一个字符将传参连成一个字符串；`"$@"`每个传参都是独立的个体，当然还会进行各种expansion，一般情况使用`"$@"`
 ```bash
-IFS=A; set -- helloAworld again; echo $@ # hello world again
-IFS=A; set -- helloAworld again; echo $* # hello world again
+set -- helloAworld again
+IFS=A echo $@ # hello world again
+IFS=A echo $* # hello world again
 
 # "$*"="$1c$2c.."
-IFS=A; set -- helloAworld again; echo "$*" # "helloAworldAagain"
+IFS=A echo "$*" # "helloAworldAagain"
 # "$@"="$1" "$2"
-IFS=A; set -- helloAworld again; echo "$@" # "helloAworld" "again"
+IFS=A echo "$@" # "helloAworld" "again"
 ```
 - `"$@"`还有个特殊情况，自动把首位和尾部join起来，比如[`set -- "ted carol" "alice bob"; printf "%s\n" "hello $@ world"`](https://stackoverflow.com/questions/27808730/word-splitting-happens-even-with-double-quotes)，这里对应了文档里面的一句话，
 [`If the double-quoted expansion occurs within a word, the expansion of the first parameter is joined with the beginning part of the original word, and the expansion of the last parameter is joined with the last part of the original word`](https://www.gnu.org/software/bash/manual/bash.html#Positional-Parameters)
 
-IFS默认值为space, tab, newline
+**IFS默认值为space, tab, newline**
 ```shell
 declare -p IFS # 查看IFS变量定义
 echo "$IFS" | hexdump -C # 0x20 0x09 0x0a
 cat -A <<< "$IFS"
 set -- helloAworld again
 IFS="A"; for v in $@; do echo $v; done
+# TODO: 为什么以下语句会报错 bash: syntax error near unexpected token `do'
+IFS="A" for v in $@; do echo $v; done
 ```
 2. 其他
 ```bash
@@ -144,6 +147,7 @@ syntax:
 - `${parameter/pattern/string} ${parameter//pattern/string}`, 替换变量值里面pattern匹配的地方, / 匹配第一处 // 全局替换 
 - `${parameter/#pattern/string} ${parameter/%pattern/string}`, 变量值匹配开头/尾部pattern
 - `${parameter^pattern} ${parameter^^pattern}`, 匹配pattern部分大写，如果没有pattern, 大写首字母或者全部大写
+- `${parameter~pattern} ${parameter~~pattern}`, reverse string case
 - `${parameter,pattern} ${parameter,,pattern}`, 匹配pattern部分小写，如果没有pattern, 小写首字母或者全部小写
 - [${parameter@operator}](https://stackoverflow.com/questions/40732193/bash-how-to-use-operator-parameter-expansion-parameteroperator), 根据operator操作值
 
@@ -198,7 +202,6 @@ eval $'cat <<-"EOF" > test.txt\n\thome:$OLDPWD\nEOF'
 - `trap [-lp] [arg] [sigspec ...]`
 ## Bourne-Again Shell Builtins
 - `declare [-aAfFgiIlnrtux] [-p] [name[=value] ...]` -r readonly, -i integer, -a array, -f function, -x exportable.
-
 ```
 -a indexed array
 -A associated array
@@ -209,6 +212,20 @@ eval $'cat <<-"EOF" > test.txt\n\thome:$OLDPWD\nEOF'
 -r readonly
 -u convert value to uppercase
 -x export variable
+```
+**[还可以缩小函数变量的scope](https://tldp.org/LDP/abs/html/declareref.html)**
+```bash
+foo (){
+declare FOO="bar"
+}
+
+bar ()
+{
+foo
+echo $FOO
+}
+
+bar  # Prints nothing.
 ```
 - `type [-afptP] [name ...]` `-t` print single word which is one of 'alias', 'fucntion', 'builtin', 'file' or 'keyworkd'
 
@@ -226,11 +243,21 @@ eval $'cat <<-"EOF" > test.txt\n\thome:$OLDPWD\nEOF'
 2. -v varname 测试var是否set，还可以使用parameter expansion判断
 if [[ -z ${varname+x} ]]; then echo "varname is unset"; else echo "varname is ${varname}"; fi
 ${varname:+x} vs ${varname+x} 相同点是只有当varname被set时才会使用x调换，否则为varname；":"除了test unset外，还会test是否为空
-3. IFS=A; set -- helloAworld again; echo $@
-还是要注意，每个语句赋值前都会经历parameter expansion等转化，如果使用语句
-IFS=A echo $@ $@在展开时使用的IFS还是原先的IFS，因为这个时候，赋值语句还没有生效，这种转化是每句语句，跟是否一个进程没有关系;
+3. 单行语句包括赋值和变量相关引用注意。一般我们会遇到如下几种，总体的解决思路就是shell执行步骤：
+```bash
+# 1. 直接引用，这种在shell执行第二步，expand除赋值和redirection语句外的word, $var被解析为以前的值，因为var=hello等到下一步才进行
+var=world
+var=hello echo "$var" # world
+
+# 2. 相比较1来说，locale执行时才调用LANG变量，这个时候LANG赋值已经执行完成
+LANG='en_US.UTF-8'
+LANG='zh_CN.UTF-8' locale # locale中没有值的都为新的'zh_CN.UTF-8'
+# 类似的，常用的IFS赋值
+set -- helloAworld again
+IFS=A echo "$*" # helloAworldAagain
+# 3. shell commands里面介绍了simple command的分类，&& 后面应该会重新走command expansion流程(https://www.gnu.org/software/bash/manual/bash.html#Shell-Operation)
 var=hello && echo $var # &&是control operator
-shell commands里面介绍了simple command的分类，&& 后面应该会重新走command expansion流程(https://www.gnu.org/software/bash/manual/bash.html#Shell-Operation)
+```
 4. sleep 60s 会生成新的sleep进程，可以使用ps -ef | grep [pid] 查看
 5. set -o [emacs|vi] # command line editting
 6. cat -A -n < /etc/passwd
@@ -240,3 +267,13 @@ grep "llo" <<< "hello world"
 1). 在变量替换 (扩展)、命令替换 (扩展)、算术替换 (扩展) 时，如果它们的结果没有使用引号包围，则尝试使用 IFS 将结果进行单词划分
 2). 在 read 命令中，根据 IFS 将所读取的内容划分为单词分别赋值给指定的变量
 9. bash执行进度动画 https://www.junmajinlong.com/shell/shell_perl_gif/
+10. 随机数
+bash中有2个相关变量`RANDOM`和`SRANDOM`, `SRANDOM`用于设置seed，如果每次设置同一个值，那么调用`$RANDOM`产生的数据都是一样的顺序打印出，`$RANDOM`使用16位数据，[0-32767]
+命令行或者脚本中可以使用这2个变量产生随机数，也可以使用awk提供的类似C的函数，如下例所示，不同的是`rand`产生的随机数区间为[0-1]
+C语言中使用函数`srandom`和`random`，区间为：[0 - 2^31-1]
+python中random函数也是[0-1]
+```bash
+# https://tldp.org/LDP/abs/html/randomvar.html
+awk_script='{for(i=0;i<10;i++){srand(seed i); print int(rand()*90+10)}}'
+echo | awk -v seed=$RANDOM $awk_script
+```
