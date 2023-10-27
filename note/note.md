@@ -1,6 +1,80 @@
+## 2023-10-25
+### strace使用
+strace trace system calls and signals，[man page](https://man7.org/linux/man-pages/man1/strace.1.html)更有趣<br>
+```strace -v -qq -f -e signal=none -e execve,file -p 12345```
+```
+-v 显示所有参数
+-qq 隐藏部分事件，详细可以使用--quiet=attach,..设置
+-f 包含子进程
+-e 设置过滤条件
+```
+
+### lsof使用, list open files
+[man 8 lsof](https://man7.org/linux/man-pages/man8/lsof.8.html) (system administration commands (usually only for root))<br>
+```
+lsof -a -P -n -R -p $$ -u 0,1,2,3 -i 4tcp@localhost:1234
+lsof -c /cr[ao]/ # 支持正则表达式
+lsof /run # 查看哪些进程使用/run文件夹
+
+-P 不做端口转换port names，速度会快点
+-n inhibits the conversion of network numbers to host names for network files，速度会快点
+-a 所有条件使用and，放的位置没有关系
+-p 指定process
+-u 指定file descriptor
+-i 指定网络相关，格式为 -i [46][tcp|udp][@hostname|hostaddr][:service|port]
+-c commands
+-R 显示PPID
+-U unix socket
+-t [file] 返回关联file的process ids，只输出pid
+```
+
+### fcntl使用, [manipulate file descriptor](https://man7.org/linux/man-pages/man2/fcntl.2.html)
+获取文件描述符的fd flag(Process级别信息)，就一个close_on_exec，对应参数F_GETFD, FD_CLOEXEC
+```
+flags = fcntl(fd, F_GETFD)
+flags & FD_CLOEXEC
+flags |= FD_CLOEXEC
+fcntl(fd, F_SETFD, flags)
+```
+获取OFD(Open File Descriptor)中的文件状态，offset等，使用F_GETFL，
+```
+flags = fcntl(fd, F_GETFL)
+access_mode = flags & O_ACCMODE
+O_RDONLY  00
+O_WRONLY  01
+O_RDWR    10
+O_ACCMODE 11
+readable: access_mode == O_RDONLY || access_mode == O_RDWR
+```
+还可以设置nonblocking，dup, file lock等操作
+
+### [flock](https://man7.org/linux/man-pages/man1/flock.1.html), manage locks from shell scripts
+1. advisory locks vs mandatory locks
+- advisory locks开发者自己去操作锁，如果不操作锁，也可以去读写文档，但是会出现信息错乱问题。
+- mandatory locks是操作系统级别的锁，读写都会检查是否有锁，性能上肯定有折扣
+
+2. lslocks 查看有哪些锁
+
+### 重温链接
+- 硬链接 同一个inode点，inode信息的引用+1，互相不影响
+- 软连接 不同的inode节点，内容指向原始路径
+```bash
+ln -s test.txt test.ln
+ln test.txt test.hard
+readlink ./test.ln # test.txt路径
+ls -i -l test.*
+stat test.txt
+```
+
+### 自动make
+sudo apt install inotify-tools
+while inotifywait -q -e modify ./fd.c; do echo -e '\n'; make; done
+
 ## 2023-10-17
 ### [bash](https://www.gnu.org/software/bash/manual/bash.html#Basic-Shell-Features)
 [bash学习文档](bash.md)
+[bash子进程解惑](https://juejin.cn/post/7293783188233027596)
+[bash重定向和文件描述符](https://juejin.cn/post/7294284628377419788)
 
 ## 2023-10-13
 ### URI

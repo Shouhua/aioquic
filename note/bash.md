@@ -168,7 +168,52 @@ while read line;do
 done < <(sleep 10; grep 'UUID' /etc/fstab)
 ```
 ## Redirections
-&>fd equals to >fd 2>&1
+```bash
+echo hello > test.txt
+echo hello >> test.txt
+cat < test.txt
+echo hello &> test.txt # &>fd equals to >fd 2>&1
+echo hello &>> test.txt
+exec 10<>test.txt
+# 使用文件描述符操作文件，文件描述符操作会改变file offset
+cat <&10 # 从当前offset打印test.txt
+echo hello again >&10
+read -n 3 -u 10 # 从文件描述符10读取3个字符，从当前offset读取后，offset+=3
+# 复制fd，新生成11
+exec 11>&10
+exec 11<&10
+# 复制fd，新生成12，并且关闭10
+exec 12<&10-
+exec 12>&10-
+# 关闭fd
+exec 12<&-
+exec 11>&-
+# 自动分配fd
+exec {fd}<>test.txt
+exec 12<&${fd} # 复制${fd}为12，如果${fd}解析为'-'，则会关闭12
+```
+额外工具查看描述符信息：
+```bash
+lsof -P -n -p $$ -u 0,1,2,3,11,12
+ls -l /dev/fd/
+ls -l /proc/$$/fd/
+cat /proc/$$/fdinfo/11 # 查看当前文件offset等信息
+ls -l /dev/fd/ &> test.txt # 查看test.txt，可以观察到stdout，stderr指向test.txt，而不是原先的$(tty)
+cat test.txt
+```
+**文件描述符与重定向**：
+![File Descriptor](./fd.jpg)
+1. [文件描述符底层关系解释](https://juejin.cn/post/7294284628377419788)
+- `dup`操作属于process内部fd操作，根据输入fd复制新建fd，如图所示比如会在第一列`ProcessA`中新生成一行，新旧的`file ptr`指向OFD同一栏，比如`fd1`和`fd20`都指向23，所有她们具有相同的文档`offset`等属性。
+- `fork`会生成子进程，子进程默认继承父进程的描述符表，比如`ProcessA`的`fd2`和`ProcessB`的`fd2`，同时指向73的OFD。
+- 不同进程中的`open`操作会生成各自的OFD行，但是会同时指向相同的inode信息，比如`ProcessA`中的`fd0`和`ProcessB`中的`fd3`，最后都指向了inode table中的1976，所以他们具有不同的file offset信息。
+
+2. `exec 11>&10`复制，相当于dup，复制后，具有相同的OFD(Open File Descriptor)项，因此具有相同的offset
+3. 不同的terminal同时使用同一个fd打开相同的文件，类似第三种情况，不同的OFD项，但是指向相同的inode table项
+4. 使用`ls -l /dev/fd/ > test.txt`时，类似上面第二种fork情况，ls会使用子进程执行，复制父进程fd table，所以能通过test.txt文件看到父进程中的fd信息
+
+5. 使用文件描述符操作文件，会改变文件file offset，读取和写入要注意，使用`cat /proc/$$/fdinfo/10`查看offset信息，相当于图片中的中间列
+6. `/dev/`文件夹始于unix，Bash重定向操作的fd在`/dev/fd/`目录下，而`/proc/`文件夹是部分系统支持
 
 ### here document
 ```bash
