@@ -1,3 +1,140 @@
+## 2023-11-02
+### Bash debug
+1. 使用`trap command DEBUG`
+```bash
+function _trap_DEBUG() 
+{
+     echo "# $BASH_COMMAND"
+     while read -r -e -p "debug> " _command; do
+          if [[ -n _command ]]; then
+               eval "$_command"
+          else
+               break;
+          fi
+     done
+}
+
+trap '_trap_DEBUG' DEBUG
+```
+2. `set -x` 或者 `bash -x`
+3. 类似于 `set -x` 方式，将信息输出到文件，主要使用两个builtin变量，`$PS4`和`$BASH_XTARCEFD`
+```bash
+exec 5<> debug.log
+PS4='$LINENO: '
+BASH_XTRACEFD='5'
+bash -x test.sh
+```
+4. 检查bash文件是否语法正确，不执行bash文件, `bash -n bash_script`
+
+### Bash network
+Linux中`/dev/[tcp|upd]/host/port`会自动建立网络连接
+1. Client
+```bash
+exec 3<>/dev/tcp/www.google.com/80
+echo -e "GET / HTTP/1.1\nHost: www.google.com\n\n" >&3
+cat <&3 | head # 默认取了返回的前10行
+```
+
+2. Server
+```bash
+coproc nc -l localhost 3000
+while read -r cmd; do
+     case $cmd in
+     d) date ;;
+     q) break ;;
+     *) echo 'What?' ;;
+     esac
+done <&${COPROC[0]} >&${COPROC[1]}
+
+kill ${COPROC_PID} # coproc会自动生成变量NAME_PID
+```
+
+## 2023-10-31
+### 单词
+`disposable product` 一次性产品<br>
+`rationale` 基本原理(为什么要这么整)，很多manpage中有这么一段<br>
+`displacement` 移动，位移，排水量<br>
+
+### [Signal](https://man7.org/linux/man-pages/man7/signal.7.html)
+1. Signal dispositions, each signal has a current *disposition*, which determines how the process behaves when it is delivered the signal. for example, "Term", "Ign", "Core" etc，即信号的默认行为方式。可以通过signal或者sigaction(推荐方式，从portable方面考虑)更改disposition(fork copy signal disposition after execve(), ignore keeped and other set default disposition)。
+2. A child created via fork(2) inherits a copy of its parent's signal dispositions. During an execve(2), the dispositions of handled signals are reset to the default; the dispositions of ignored signals are left unchanged. 这句话注意fork后，exceve前时间signal状态，**另外就是所有忽略的signal直接继承，不会更改为默认**
+3. **SIGKILL(9)**和**SIGSTOP(19)**不能被caught, ignore, block
+4. **SIGINT, SIGQUIT**对后台进程无效，because **interrupt from keyboard**
+5. [查看进程的所有singal的disposition](https://unix.stackexchange.com/questions/85364/how-can-i-check-what-signals-a-process-is-listening-to)
+6. *SIGCHLD* 每当子进程状态发生变化时，kernel会给其父进程发送SIGCHLD消息，包括子进程stopped，continued，terminated
+7. *SIGPIPE* 用于管道或者socket，写入一个不能读或者读一个不能写入的管道，一端socket已经意外关闭，还继续读写等情况触发
+8. *SIGALARM* 使用`alarm(seconds)`触发
+```bash
+cat /proc/pid/status | grep -E 'Sig.+'
+```
+6. kill, killall
+```bash
+kill -l # 1) SIGHUB 2) SIGINT ...
+kill -9 pid # send 9(sigkill) to operation system，不给程序机会捕获机会
+kill -2 pid # send SIGINT(Ctrl+C) to 程序
+kill %1 # terminate a background job
+kill pid # terminate a program using the default SIGTERM(terminate) signal
+
+# killall kill process by name
+killall -9 sleep
+killall -l # HUB INT QUIT ...
+```
+7. trap
+- SYNOSIS:
+```bash
+trap -- INT QUIT TERM EXIT # diposition: default 恢复成默认行为
+trap "" INT # ignore
+trap "echo INT signal caught" INT # caught and execute custom command
+```
+- `kill -2 pid` VS  `CTRL+C`
+CTRL+C会发送SIGINT给所有的*foreground process group*(有terminal的process group)，而前者仅仅发送给相应的pid
+
+8. 程序流程套路
+fork,execve,wait, waitpid
+sigprocmask, sigaction, sigsuspend
+详细参考[例子](./signal.c)
+
+### fork and execve
+exec+e覆盖env，使用传入的环境变量，使用getenv，putenv, setenv and unsetenv等方法修改
+execvep _GNU_SOURCE
+
+## 2023-10-30
+### [Bash启动文件(bash startup files)](https://cjting.me/2020/08/16/shell-init-type/)
+1. login+interactive/non-interactive, 比如ssh登录等，也可以设置terminal为登录shell(一般terminal设置中有相应的项去check)
+- `/etc/profile`，一般这个脚本里面会执行`/etc/profile.d/*`里面多有脚本
+- *`~/.bash_profile`, `~/.bash_login`, `~/.profile`* 按这个顺寻寻找文件，只执行最先找到的可执行文件
+- 退出时执行`~/.bash_logout`
+2. non-login+interactive, 比如使用UI界面中使用terminal，或者在terminal中使用执行bash命令
+- `~/.bashrc`
+3. non-login+non-interactive, 比如使用bash命令执行脚本，比如`bash test.txt`
+- 执行`$BASH_ENV`指向的文件
+
+**CAVEATS**
+1. bash命令可以使用`-l`, `-i`强迫使用login或者interactive方式执行，另外还有`--norc`，`--noprofile`, `--init-file`/`--rc-file`(Execute commands from filename (**instead of ~/.bashrc**) in an **interactive shell**.)
+2. 判断login或者interactive shell
+```bash
+# 是否为login shell
+shopt login_shell
+
+#是否为interactive shell
+case $- in *i*) echo "interactive shell";; *) echo "non-interactive shell";; esac
+echo $- # 里面包含i
+echo $PS1 # 不为空
+```
+
+### xdg-open
+根据不同参数使用不同默认打开方式打开，`open`命令指向她
+
+### realpath, readlink, dirname, basename
+```bash
+# 获取全路径
+realpath test.txt # /home/user/test.txt
+readlink test.ln # 查看软连接目标
+realpath test.txt | xargs dirname # /home/user
+realpath test.txt | xargs basename # test.txt
+realpath test.txt | xargs basename -s .txt # test 去掉后缀
+```
+
 ## 2023-10-25
 ### strace使用
 strace trace system calls and signals，[man page](https://man7.org/linux/man-pages/man1/strace.1.html)更有趣<br>
