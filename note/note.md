@@ -1,3 +1,69 @@
+## 2023-11-08
+### Bash printf
+`%q`，用于生成可以在bash命令中使用的字符串，比如有些options为`key = value`，这样去使用肯定有问题，所以可以格式化下
+```bash
+printf "%q " "a = b" # a\ =\ b
+```
+
+### Bash Alias和原生命令
+```bash
+command ls
+\ls # 转义使用原生命令
+shopt -u expand_aliases
+type -a ls
+```
+
+### [Postgres docker shell file](https://github.com/docker-library/postgres/blob/master/16/bookworm/docker-entrypoint.sh)
+1. indirect expansion, `${!var}` 感叹号开头的变量，要不就是数组的key，要不就要考虑indirect expansion
+```bash
+# 比如脚本中file_env中，使用本地变量indirect expansion获取外边环境变量的值
+var=hello var1=var bash -c 'echo ${!var1}' # hello
+```
+2. 函数内部引用外部变量，填补了不能返回值的问题
+```bash
+myvar="hello world"
+function ref_test() {
+#    declare -n var="$1"
+     local -n var="$1"
+     var="hello again"
+}
+
+echo "$myvar"
+ref_test 
+echo "$myvar"
+```
+3. FUNCNAME, BASH_SOURCE  
+`FUNCNAME`, 数组，默认情况函数调用名称，最下面是`main`，如果使用source执行文件，则为`source`，脚本中判断是否使用source执行函数`is_source`使用此环境变量
+```bash
+function _is_source() {
+     [ "${#FUNCNAME[@]}" -ge 2 ] \
+          && [ "${FUNCNAME[0]}" == 'is_source' ] \
+          && [ "${FUNCNAME[1]}" == 'source' ]
+}
+```
+`BASH_SOURCE`，比如嵌套执行文件中，想正确获取$0, 可以使用此变量，调用栈的$0，可以试想下，`./hello.sh`在新进程中执行
+```bash
+# hello.sh
+echo "BASH_SOURCE: $BASH_SOURCE"
+echo -n '$0: '
+echo "$0"
+
+# test.sh
+source hello.sh
+# BASH_SOURCE: hello.sh ./test.sh
+# $0: ./test.sh
+./hello.sh
+# BASH_SOURCE: ./hello.sh
+# $0: ./hello.sh
+```
+
+### Linux setid bit, setgroup bit, sticky bit
+可以使用octal表示，比如setid bit为4***，比如搜索setid bit设置的文件:
+```bash
+find /bin/* -perm /4000 -ls
+```
+其他setgroup bit为2000, sticky bit为1000, 其中000表示user, group, other的permission八进制表示
+
 ## 2023-11-02
 ### Bash debug
 1. 使用`trap command DEBUG`
@@ -204,28 +270,30 @@ stat test.txt
 ```
 
 ### 自动make
+```bash
 sudo apt install inotify-tools
 while inotifywait -q -e modify ./fd.c; do echo -e '\n'; make; done
+```
 
 ## 2023-10-17
-### [bash](https://www.gnu.org/software/bash/manual/bash.html#Basic-Shell-Features)
-[bash学习文档](bash.md)
-[bash子进程解惑](https://juejin.cn/post/7293783188233027596)
-[bash重定向和文件描述符](https://juejin.cn/post/7294284628377419788)
+### [Bash](https://www.gnu.org/software/bash/manual/bash.html#Basic-Shell-Features)
+[bash学习文档](bash.md)<br>
+[bash子进程解惑](https://juejin.cn/post/7293783188233027596)<br>
+[bash重定向和文件描述符](https://juejin.cn/post/7294284628377419788)<br>
 
 ## 2023-10-13
 ### URI
 `scheme(protocol) name/password host port path query fragment`<br>
 `https://user:pass@example.com:9090/list?start=3#content`
-### build curl
+### Build curl
 ```shell
 ./configure --with-openssl --prefix=$HOME/curl
 PKG_CONFIG_PATH=$HOME/curl/lib/pkgconfig pkg-config --libs --cflags libcurl
 ```
-### html
+### HTML
 1. url-encoding 也叫 percent-encoding
 2. form tag默认的enctype为application/x-www-form-urlencoded(curl -d)，也可以改为enctype=multi/form-data(curl -F)
-### curl command line use
+### Curl command line use
 ```shell
 # only show response header
 curl -I http://example.com
@@ -233,7 +301,7 @@ curl -I http://example.com
 curl -v -I http://example.com
 # show request conent data
 curl --trace curl.log -d "name=john" http://example.com
-# -d 默认设置Content-Type: application/x-www-form-urlencoded 使用POST传递数据-d时，需要修改type，比如-H "application/json"
+# -d 传输数据默认使用Content-Type: application/x-www-form-urlencoded 如果需要修改type，可以添加相应的头部，比如-H "application/json"
 curl -d "name=john" -H "application/json" http://example.com 
 # -c file 存储cookie到file，-b [data/file] 读取cookie
 curl -c cookies -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" https://www.baidu.com
@@ -246,7 +314,7 @@ sudo apt install manpage-posix-dev
 man sys_time.h # sys/time.h
 man time.h
 ```
-### libc datetime
+### glibc之datetime
 ```c
 // sys/time.h
 struct timeval {
@@ -290,6 +358,30 @@ printf("The time zone is '%ld's\n", timezone);
 printf("The time zone is '%s'\n", *tzname);
 printf("The daylight is '%d'\n", daylight);
 ```
+
+### [Datetime format](https://man7.org/linux/man-pages/man3/strftime.3.html)
+1. 文档中提及的[`broken-down time`](https://www.gnu.org/software/libc/manual/html_node/Broken_002ddown-Time.html), 表示将年月日等信息单独出来的二进制，人类友好可阅读，使用 `struct tm` 表示; 机器使用[time_t](https://www.gnu.org/software/libc/manual/html_node/Time-Types.html)表示，表示距离1970-1-1 00:00:00 UTC的秒数
+2. ctime操作(transform date and time to broken-down time or ASCII)可以查看[文档](https://man7.org/linux/man-pages/man3/ctime.3.html)
+```C
+char *asctime(const struct tm *tm);
+struct tm * localtime (const time_t *time)
+time_t mktime(struct tm *tm);
+
+// 给定tm结构按照format输出到s
+size_t strftime(char s[restrict .max], size_t max,
+               const char *restrict format,
+               const struct tm *restrict tm);
+
+char *strptime(const char *restrict s, const char *restrict format,
+               struct tm *restrict tm);
+```
+其中format转义字符大部分其他语言都遵守这个规则，比如python，使用python调试这些更方便
+```python
+from datetime import datetime
+now = datetime.now()
+now.strftime("%Y-%m-%e") # 2023-10-11
+datetime.strptime("2020-10-11", "%Y-%m-%d") # datetime.datetime(2020, 10, 11, 0, 0)
+```
 ## 2023-10-11
 ### [locale](https://wiki.archlinuxcn.org/wiki/Locale)
 locate categories: LC_COLLATE, LC_TIME, LC_MESSAGES, LC_NAME<br>
@@ -301,12 +393,12 @@ locale -k LC_NAME
 locale -k name_fmt
 ```
 1. LC_ALL一般不设置，用于在命令行中临时设置控制程序行为，比如用于使用原生C类型排序时，`LC_ALL=C sort file.txt`
-2. env环境变量中都是有值的键值对，LC_*, LANGUAGE, LANG如果没有被设置，env没有相应的变量；尽管使用`locale`命令都会显示出来，特别是LC_*(LC_ALL除外)，有个规则
+2. env环境变量中都是有值的键值对，LC_\*, LANGUAGE, LANG如果没有被设置，env没有相应的变量；尽管使用`locale`命令都会显示出来，特别是LC_*(LC_ALL除外)，有个规则
 如果LC_\*不存在，则使用LANG的值填充，这就是为什么命令`locale`结果中LC_\*有的值没有对应环境变量，[如果LANG也没有值，则值为"POSIX"](https://unix.stackexchange.com/questions/449318/how-does-the-locale-program-work) and [here](https://unix.stackexchange.com/questions/449318/how-does-the-locale-program-work)
 ```shell
 LANG= locale | grep 'POSIX'
 ```
-3. **如果env中不存在值，那就被设置为局部变量，比如：假设LC_COLLATE不存在env中，那就无法被子shell继承，并且无法对使用改环境变量的命令产生影响**
+3. **如果env中不存在值，那就被设置为局部变量，比如：假设LC_COLLATE不存在env中，那就无法被子shell继承，并且无法对使用该环境变量的命令产生影响**
 ```shell
 env | grep LC_COLLATE # 空 LC_COLLATE不存在
 locale | grep LC_COLLCATE # LC_COLLCATE="en_US.UTF-8" 因为LANG="en_US.UTF-8" 
@@ -355,43 +447,22 @@ echo -e 'a\nb\nA\nB\n' | LC_COLLATE=en_US.UTF-8 sort
 2. 其中shell中`<<<`代表[here string](https://www.gnu.org/software/bash/manual/bash.html#Here-Strings)，`<<`表示here document<br>
 3. [\$'\x31' vs \$"\x31"](https://unix.stackexchange.com/questions/48106/what-does-it-mean-to-have-a-dollarsign-prefixed-string-in-a-script) \$'str'转义字符串，类似echo -e；$"str"用于根据locale翻译str
 
-### [datetime fromat](https://man7.org/linux/man-pages/man3/strftime.3.html)
-1. 文档中提及的[`broken-down time`](https://www.gnu.org/software/libc/manual/html_node/Broken_002ddown-Time.html), 表示将年月日等信息单独出来的二进制，人类友好可阅读，使用 `struct tm` 表示; 机器使用[time_t](https://www.gnu.org/software/libc/manual/html_node/Time-Types.html)表示，表示距离1970-1-1 00:00:00 UTC的秒数
-2. ctime操作(transform date and time to broken-down time or ASCII)可以查看[文档](https://man7.org/linux/man-pages/man3/ctime.3.html)
-```C
-char *asctime(const struct tm *tm);
-struct tm * localtime (const time_t *time)
-time_t mktime(struct tm *tm);
-
-// 给定tm结构按照format输出到s
-size_t strftime(char s[restrict .max], size_t max,
-               const char *restrict format,
-               const struct tm *restrict tm);
-
-char *strptime(const char *restrict s, const char *restrict format,
-               struct tm *restrict tm);
-```
-其中format转义字符大部分其他语言都遵守这个规则，比如python，使用python调试这些更方便
-```python
-from datetime import datetime
-now = datetime.now()
-now.strftime("%Y-%m-%e") # 2023-10-11
-datetime.strptime("2020-10-11", "%Y-%m-%d") # datetime.datetime(2020, 10, 11, 0, 0)
-```
 ## 2023-10-09
 ### [BRE and ERE](https://www.gnu.org/software/sed/manual/sed.html#BRE-vs-ERE)
 Basic and extended regular expressions are two variations on the syntax of the specified pattern. Basic Regular Expression (BRE) syntax is the default in sed (and similarly in grep). Use the POSIX-specified -E option (-r, --regexp-extended) to enable Extended Regular Expression (ERE) syntax.
 
-In GNU sed, the only difference between basic and extended regular expressions is in the behavior of a few special characters: ‘?’, ‘+’, parentheses, braces (‘{}’), and ‘|’.
+In GNU sed, the only difference between basic and extended regular expressions is in the behavior of a few special characters: `'?'`, `'+'`, `parentheses('()')`, `braces('{}')`, and `'|'`.
 
 With basic (BRE) syntax, these characters do not have special meaning unless prefixed with a backslash (‘\’); While with extended (ERE) syntax it is reversed: these characters are special unless they are prefixed with backslash (‘\’).
 
 | Desired pattern | Basic (BRE) Syntax | Extended (ERE) Syntax |
 | -- | ---- | ---- |
-|literal ‘+’ (plus sign)|```$ echo 'a+b=c' > foo <br/>```<br>```$ sed -n '/a+b/p' foo a+b=c```| ```$ echo 'a+b=c' > foo```<br>```$ sed -E -n '/a\+b/p' foo a+b=c```|
+|literal ‘+’ (plus sign)|```$ echo 'a+b=c' > foo```<br>```$ sed -n '/a+b/p' foo a+b=c```| ```$ echo 'a+b=c' > foo```<br>```$ sed -E -n '/a\+b/p' foo a+b=c```|
 |One or more ‘a’ characters followed by ‘b’ (plus sign as special meta-character)| ```$ echo aab > foo```<br>```$ sed -n '/a\+b/p' foo aab```|```$ echo aab > foo```<br>```$ sed -E -n '/a+b/p' foo aab```|
+
 ### man 1 printf
 `printf "%s\n" abode bad bed bit bid byte body` 会将后面的arguments执行7次，得到结果: `abode\nbad\nbed\nbit\nbid\nbyte\nbody\n`
+
 ### [awk redirect](https://www.gnu.org/software/gawk/manual/gawk.html#Redirection)
 `netstat -t | awk 'NR != 1 && NR != 2 { print > $6 }'`<br>
 这里的 **>** 与shell种的redirect行为不同，这里是append，详见上面链接文档
@@ -408,12 +479,13 @@ With basic (BRE) syntax, these characters do not have special meaning unless pre
 ```
 
 ## 2023-09-29
-### quic加解密用到的cid
+### QUIC加解密用到的cid
 1. **计算密钥时要用到的cid，如果没有retry packet的话，使用client发送的最初initial packetd中的destination cid。如果发生retry，则在下次client initial packet中使用这个scid作为dcid，并且server和client都以此作为加解密使用的cid。** retry packet中的source cid必须是自己选择的，不能与前面的client initial packet中的destination cid相同，这个跟version negotiation不同
 2. [version negotiation destination cid和source cid必须跟client initial packet中的source cid和destination cid保持一致](https://github.com/alibaba/xquic/blob/main/docs/translation/rfc9000-transport-zh.md#1721-%E7%89%88%E6%9C%AC%E5%8D%8F%E5%95%86%E5%8C%85version-negotiation-packet)
+
 ## 2023-09-27
 ### [TLS1.3变长字段编码](https://datatracker.ietf.org/doc/html/rfc8446#section-3.4)
-在使用HKDF计算时，其中的label需要按照[文档](https://datatracker.ietf.org/doc/html/rfc8446#section-7.1)编码，很容易错误是对于变长字段不添加长度前缀，这个在文档的3.4章有提及，太隐晦○|￣|_
+在使用HKDF计算时，其中的label需要按照[文档](https://datatracker.ietf.org/doc/html/rfc8446#section-7.1)编码，很容易错误是对于**变长字段需要添加长度前缀**，这个在文档的3.4章有提及，太隐晦○|￣|_
 ```
 HKDF-Expand-Label(Secret, Label, Context, Length) =
             HKDF-Expand(Secret, HkdfLabel, Length)
@@ -448,7 +520,7 @@ print(hkdf_label)
 - octal: 代表八进制
 ### hexdump, xxd
 1. KB and K(KiB)  
-hexdump可以使用K或者KiB代表1024字节，K代表1000字节
+hexdump可以使用K或者KiB代表1024字节，KB代表1000字节
 2. Format and Color in HEXDUMP
 ```shell
 hexdump -e '"%08_Ax_L[cyan]\n"' -e '"%08_ax_L[cyan]  " 8/2 "%04x_L[green:0x6f72@0-1,!red:0x6f72@0-1] " "  |"' -e '16/1 "%_p" "|" "\n"' -n 64 /etc/passwd
