@@ -1,3 +1,10 @@
+## 2023-11-10
+### vim命令行执行Ex命令
+```bash
+vi -E -e -c "1d" -c "wq" -s bootstrap.sh
+vi -E -s -u "$HOME/.vimrc" +PlugUpdate +qall
+```
+
 ## 2023-11-08
 ### Bash printf
 `%q`，用于生成可以在bash命令中使用的字符串，比如有些options为`key = value`，这样去使用肯定有问题，所以可以格式化下
@@ -135,6 +142,7 @@ cat /proc/pid/status | grep -E 'Sig.+'
 ```
 6. kill, killall
 ```bash
+kill -0 pid # 测试pid是否存在，check existence and permission
 kill -l # 1) SIGHUB 2) SIGINT ...
 kill -9 pid # send 9(sigkill) to operation system，不给程序机会捕获机会
 kill -2 pid # send SIGINT(Ctrl+C) to 程序
