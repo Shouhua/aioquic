@@ -33,7 +33,7 @@ function fname [()] compound-command [ redirections ]
 ```
 2. scope
 - 默认function里面的变量，调用函数后，函数外是能访问到的
-- local声明的变量，只在自己和子函数中可见; **在函数中使用declare声明变量可以只能在本函数中使用, 详见declare解释中举例说明**
+- local/declare声明的变量，只在自己和子函数中可见，使用 `-g` 可以让变量全局可见
 3. return
 正常情况下，函数的返回状态是最后一个命令的exit status；如果有`return [number]`则为number，如果return的其他类型，则还是最后一个命令的exit status
 
@@ -66,6 +66,16 @@ IFS=A echo "$@" # "helloAworld" "again"
 ```
 - `"$@"`还有个特殊情况，自动把首位和尾部join起来，比如[`set -- "ted carol" "alice bob"; printf "%s\n" "hello $@ world"`](https://stackoverflow.com/questions/27808730/word-splitting-happens-even-with-double-quotes)，这里对应了文档里面的一句话，
 [`If the double-quoted expansion occurs within a word, the expansion of the first parameter is joined with the beginning part of the original word, and the expansion of the last parameter is joined with the last part of the original word`](https://www.gnu.org/software/bash/manual/bash.html#Positional-Parameters)
+```bash
+set -- "ted carol" "alice bob"
+
+# hello ted carol
+# alice bob world
+printf "%s\n" "hello $@ world"
+
+# hello ted carol alice bob world
+printf "%s\n" "hello $* world"
+```
 
 **IFS默认值为space, tab, newline**
 ```shell
@@ -261,16 +271,18 @@ eval $'cat <<-"EOF" > test.txt\n\thome:$OLDPWD\nEOF'
 **[还可以缩小函数变量的scope](https://tldp.org/LDP/abs/html/declareref.html)**
 ```bash
 foo (){
-declare FOO="bar"
+  declare FOO="bar"
+  local -g FOOBAR="foobar"
 }
 
 bar ()
 {
-foo
-echo $FOO
+  foo
+  echo $FOO
+  echo $FOOBAR
 }
 
-bar  # Prints nothing.
+bar  # only print foobar
 ```
 - `type [-afptP] [name ...]` `-t` print single word which is one of 'alias', 'fucntion', 'builtin', 'file' or 'keyworkd'
 

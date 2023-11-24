@@ -1,3 +1,57 @@
+## 2023-11-23
+### Bash中的set builtin
+1. 一般在新建脚本时候，都会使用set设置shell配置，比如 `set -eEuo pipefail`，其中的 `-e` 用于设置发生错误时立即退出脚本。如果有`trap 'cmd' ERR`，会先执行`cmd`再退出脚本。如果没有`-e`，`cmd`执行后会继续执行后面脚本，除非`cmd`里面有退出脚本的命令，比如`exit`。但是有些命令返回不为0也并不意味着发生错误，因此需要绕过这类，主要有以下几种方式：
+1) 不使用全局set -e，使用trap方式在handler中控制
+2) 局部使用set +e
+3) false || echo "failed"，这个不会触发
+
+2. 默认情况下shell functions, command substitutions, and commands executed in a subshell environment这些环境不会继承ERR trap，使用 set -E开放继承。
+
+```bash
+#!/usr/bin/env bash
+set -uo pipefail
+set -e
+set -E
+
+trap 'echo "#$LINENO: $BASH_COMMAND RETURNS $?"' ERR
+
+echo "before false"
+false
+echo "after false"
+```
+
+## 2023-11-21
+### Bash中 `[]` 和 `[[]]` 的区别
+根本区别是`[]`是命令，路径位于`/usr/bin/[`，而`[[]]`只是Bash中的关键字, 这就决定了两者执行的不同。
+```bash
+type -a [ # [ is a shell builtin\n[ is /usr/bin/[ ...
+type -a [[ # [[ is a shell keyword
+```
+`[ expression ]`在执行的时候，中间的expression会被解释为函数参数，因此会被一次性执行各种expansion；但是`[[ expression ]]`是**keyword**，中间的expression可以根据Bash自己的规则解释，比如如果expression有多个子expression，然后执行且、或等操作，就会先执行第一个，使用[lazy evaluation](https://lists.gnu.org/archive/html/help-bash/2014-06/msg00013.html)。
+```bash
+# 如果$3为空，[ $# -gt 3 -a = "-ks" ] 式子不知道怎么解析
+[ $# -gt 3 -a $3 = "-ks" ]
+```
+相信这也是`[]`里面不能使用`&&`的原因，这样无法解析语句了，比如
+```bash
+[ -z $SHELL && -n $PWD ] # 报错，找不到]
+```
+
+### Linux中目录切换技巧
+使用pushd和popd，临时切换目录执行后回到当前目录
+
+### --no-clobber
+Linux文档中经常出现`--no-clobber`，意思是是否要覆盖已存在文件
+
+### Node流跟文件联系
+```js
+const fs = require('fs')
+
+const ws = fs.createWriteStream('filePath')
+ws.write(buffer)
+ws.end()
+```
+
 ## 2023-11-10
 ### vim命令行执行Ex命令
 ```bash
@@ -300,7 +354,22 @@ PKG_CONFIG_PATH=$HOME/curl/lib/pkgconfig pkg-config --libs --cflags libcurl
 ```
 ### HTML
 1. url-encoding 也叫 percent-encoding
-2. form tag默认的enctype为application/x-www-form-urlencoded(curl -d)，也可以改为enctype=multi/form-data(curl -F)
+2. form tag默认的enctype为application/x-www-form-urlencoded(curl -d)，也可以改为[enctype=multipart/form-data(curl -F)](https://www.w3.org/Protocols/rfc1341/7_2_Multipart.html)，application/x-www-form-urlcoded用于简单的key-value传递，使用 `&` 连接，比如 `name=james&age=39`；如果有二进制内容需要传递，可以使用`multipart/form-data`, 报文如下格式:
+```
+Content-Type: multipart/form-data; boundary=abc
+
+--abc
+Content-Disposition: form-data; name="name"
+
+James
+--abc
+Content-Disposition: form-data; name="age"
+
+39
+--abc--
+```
+**上面内容开始需要在boundary前面加 `--`，结尾时需要在头尾均加上 `--`**
+
 ### Curl command line use
 ```shell
 # only show response header
