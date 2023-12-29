@@ -302,7 +302,9 @@ class WebTransportHandler:
                 )
             end_stream = True
         elif message["type"] == "webtransport.datagram.send":
-            self.connection.send_datagram(flow_id=self.stream_id, data=message["data"])
+            self.connection.send_datagram(
+                stream_id=self.stream_id, data=message["data"]
+            )
         elif message["type"] == "webtransport.stream.send":
             self.connection._quic.send_stream_data(
                 stream_id=message["stream"], data=message["data"]
@@ -440,7 +442,7 @@ class HttpServerProtocol(QuicConnectionProtocol):
         elif isinstance(event, DatagramReceived):
             # NOTICE: HttpRequestHandler没有DatagramReceived相应的处理，直接丢弃
             # 只有WebTransport支持DatagramReceived这种event处理
-            handler = self._handlers[event.flow_id]
+            handler = self._handlers[event.stream_id]
             handler.http_event_received(event)
         elif isinstance(event, WebTransportStreamDataReceived):
             handler = self._handlers[event.session_id]
@@ -497,6 +499,8 @@ async def main(
 
 
 if __name__ == "__main__":
+    defaults = QuicConfiguration(is_client=False)
+
     parser = argparse.ArgumentParser(description="QUIC server")
     parser.add_argument(
         "app",
@@ -511,6 +515,12 @@ if __name__ == "__main__":
         type=str,
         required=True,
         help="load the TLS certificate from the specified file",
+    )
+    parser.add_argument(
+        "--congestion-control-algorithm",
+        type=str,
+        default="reno",
+        help="use the specified congestion control algorithm",
     )
     parser.add_argument(
         "--host",
@@ -535,6 +545,12 @@ if __name__ == "__main__":
         "--secrets-log",
         type=str,
         help="log secrets to a file, for use with Wireshark",
+    )
+    parser.add_argument(
+        "--max-datagram-size",
+        type=int,
+        default=defaults.max_datagram_size,
+        help="maximum datagram size to send, excluding UDP or IP overhead",
     )
     parser.add_argument(
         "-q",
@@ -576,10 +592,12 @@ if __name__ == "__main__":
 
     configuration = QuicConfiguration(
         alpn_protocols=H3_ALPN + H0_ALPN + ["siduck"],
+        congestion_control_algorithm=args.congestion_control_algorithm,
         is_client=False,
         # https://github.com/alibaba/xquic/blob/main/docs/translation/rfc9221-datagram-zh.md
         # 告知对端支持datagram frame type
         max_datagram_frame_size=65536,
+        max_datagram_size=args.max_datagram_size,
         quic_logger=quic_logger,
         secrets_log_file=secrets_log_file,
     )

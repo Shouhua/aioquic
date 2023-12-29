@@ -448,6 +448,12 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--congestion-control-algorithm",
+        type=str,
+        default="reno",
+        help="use the specified congestion control algorithm",
+    )
+    parser.add_argument(
         "-d", "--data", type=str, help="send the specified data in a POST request"
     )
     parser.add_argument(
@@ -506,6 +512,12 @@ if __name__ == "__main__":
         help="local port to bind for connections",
     )
     parser.add_argument(
+        "--max-datagram-size",
+        type=int,
+        default=defaults.max_datagram_size,
+        help="maximum datagram size to send, excluding UDP or IP overhead",
+    )
+    parser.add_argument(
         "--zero-rtt", action="store_true", help="try to send requests using 0-RTT"
     )
 
@@ -521,7 +533,10 @@ if __name__ == "__main__":
 
     # prepare configuration
     configuration = QuicConfiguration(
-        is_client=True, alpn_protocols=H0_ALPN if args.legacy_http else H3_ALPN
+        is_client=True,
+        alpn_protocols=H0_ALPN if args.legacy_http else H3_ALPN,
+        congestion_control_algorithm=args.congestion_control_algorithm,
+        max_datagram_size=args.max_datagram_size,
     )
     if args.ca_certs:
         configuration.load_verify_locations(args.ca_certs)

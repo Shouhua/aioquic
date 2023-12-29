@@ -1,12 +1,13 @@
 import asyncio
 import datetime
 import functools
+import ipaddress
 import logging
 import os
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519
+from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, rsa
 
 
 def asynctest(coro):
@@ -15,6 +16,15 @@ def asynctest(coro):
         asyncio.run(coro(*args, **kwargs))
 
     return wrap
+
+
+def dns_name_or_ip_address(name):
+    try:
+        ip = ipaddress.ip_address(name)
+    except ValueError:
+        return x509.DNSName(name)
+    else:
+        return x509.IPAddress(ip)
 
 
 def generate_certificate(*, alternative_names, common_name, hash_algorithm, key):
@@ -34,7 +44,7 @@ def generate_certificate(*, alternative_names, common_name, hash_algorithm, key)
     if alternative_names:
         builder = builder.add_extension(
             x509.SubjectAlternativeName(
-                [x509.DNSName(name) for name in alternative_names]
+                [dns_name_or_ip_address(name) for name in alternative_names]
             ),
             critical=False,
         )
@@ -68,6 +78,16 @@ def generate_ed448_certificate(common_name, alternative_names=[]):
         alternative_names=alternative_names,
         common_name=common_name,
         hash_algorithm=None,
+        key=key,
+    )
+
+
+def generate_rsa_certificate(common_name, alternative_names=[]):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return generate_certificate(
+        alternative_names=alternative_names,
+        common_name=common_name,
+        hash_algorithm=hashes.SHA256(),
         key=key,
     )
 

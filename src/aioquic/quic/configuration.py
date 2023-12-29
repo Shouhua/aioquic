@@ -12,6 +12,8 @@ from ..tls import (
 from .logger import QuicLogger
 from .packet import QuicProtocolVersion
 
+SMALLEST_MAX_DATAGRAM_SIZE = 1200
+
 
 @dataclass
 class QuicConfiguration:
@@ -22,6 +24,13 @@ class QuicConfiguration:
     alpn_protocols: Optional[List[str]] = None
     """
     A list of supported ALPN protocols.
+    """
+
+    congestion_control_algorithm: str = "reno"
+    """
+    The name of the congestion control algorithm to use.
+
+    Currently supported algorithms: `"reno", `"cubic"`.
     """
 
     connection_id_length: int = 8
@@ -46,6 +55,11 @@ class QuicConfiguration:
     Connection-wide flow control limit.
     """
 
+    max_datagram_size: int = SMALLEST_MAX_DATAGRAM_SIZE
+    """
+    The maximum QUIC payload size in bytes to send, excluding UDP or IP overhead.
+    """
+
     max_stream_data: int = 1048576
     """
     Per-stream flow control limit.
@@ -65,7 +79,11 @@ class QuicConfiguration:
 
     server_name: Optional[str] = None
     """
-    The server name to send during the TLS handshake the Server Name Indication.
+    The server name to use when verifying the server's TLS certificate, which
+    can either be a DNS name or an IP address.
+
+    If it is a DNS name, it is also sent during the TLS handshake in the
+    Server Name Indication (SNI) extension.
 
     .. note:: This is only used by clients.
     """
@@ -73,6 +91,13 @@ class QuicConfiguration:
     session_ticket: Optional[SessionTicket] = None
     """
     The TLS session ticket which should be used for session resumption.
+    """
+
+    token: bytes = b""
+    """
+    The address validation token that can be used to validate future connections.
+
+    .. note:: This is only used by clients.
     """
 
     cadata: Optional[bytes] = None

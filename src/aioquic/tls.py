@@ -1,4 +1,5 @@
 import datetime
+import ipaddress
 import logging
 import os
 import ssl
@@ -40,13 +41,16 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from OpenSSL import crypto
 
-from .buffer import Buffer
+from .buffer import Buffer, BufferReadError
 
 TLS_VERSION_1_2 = 0x0303
 TLS_VERSION_1_3 = 0x0304
 TLS_VERSION_1_3_DRAFT_28 = 0x7F1C
 TLS_VERSION_1_3_DRAFT_27 = 0x7F1B
 TLS_VERSION_1_3_DRAFT_26 = 0x7F1A
+
+CLIENT_CONTEXT_STRING = b"TLS 1.3, client CertificateVerify"
+SERVER_CONTEXT_STRING = b"TLS 1.3, server CertificateVerify"
 
 T = TypeVar("T")
 
@@ -96,6 +100,10 @@ class AlertCertificateExpired(Alert):
     description = AlertDescription.certificate_expired
 
 
+class AlertDecodeError(Alert):
+    description = AlertDescription.decode_error
+
+
 class AlertDecryptError(Alert):
     description = AlertDescription.decrypt_error
 
@@ -137,14 +145,16 @@ class State(Enum):
     CLIENT_EXPECT_SERVER_HELLO = 1
     CLIENT_EXPECT_ENCRYPTED_EXTENSIONS = 2
     CLIENT_EXPECT_CERTIFICATE_REQUEST_OR_CERTIFICATE = 3
-    CLIENT_EXPECT_CERTIFICATE_CERTIFICATE = 4
+    CLIENT_EXPECT_CERTIFICATE = 4
     CLIENT_EXPECT_CERTIFICATE_VERIFY = 5
     CLIENT_EXPECT_FINISHED = 6
     CLIENT_POST_HANDSHAKE = 7
 
     SERVER_EXPECT_CLIENT_HELLO = 8
-    SERVER_EXPECT_FINISHED = 9
-    SERVER_POST_HANDSHAKE = 10
+    SERVER_EXPECT_CERTIFICATE = 9
+    SERVER_EXPECT_CERTIFICATE_VERIFY = 10
+    SERVER_EXPECT_FINISHED = 11
+    SERVER_POST_HANDSHAKE = 12
 
 
 def hkdf_label(label: bytes, hash_value: bytes, length: int) -> bytes:
@@ -219,13 +229,36 @@ def verify_certificate(
     # verify subject
     if server_name is not None:
         try:
-            service_identity.cryptography.verify_certificate_hostname(
-                certificate, server_name
-            )
+            ipaddress.ip_address(server_name)
+        except ValueError:
+            is_ip = False
+        else:
+            is_ip = True
+
+        try:
+            if is_ip:
+                service_identity.cryptography.verify_certificate_ip_address(
+                    certificate, server_name
+                )
+            else:
+                service_identity.cryptography.verify_certificate_hostname(
+                    certificate, server_name
+                )
+
         except service_identity.VerificationError as exc:
-            raise AlertBadCertificate(
-                "Certificate does not match hostname '%s'" % server_name
-            ) from exc
+            patterns = service_identity.cryptography.extract_patterns(certificate)
+            if len(patterns) == 0:
+                errmsg = "subject alternative name not found in the certificate"
+            elif len(patterns) == 1:
+                errmsg = f"hostname {server_name!r} doesn't match {patterns[0]!r}"
+            else:
+                patterns_repr = ", ".join(repr(pattern) for pattern in patterns)
+                errmsg = (
+                    f"hostname {server_name!r} doesn't match "
+                    f"either of {patterns_repr}"
+                )
+
+            raise AlertBadCertificate(errmsg) from exc
 
     # load CAs
     store = crypto.X509Store()
@@ -305,6 +338,10 @@ class HandshakeType(IntEnum):
     MESSAGE_HASH = 254
 
 
+class NameType(IntEnum):
+    HOST_NAME = 0
+
+
 class PskKeyExchangeMode(IntEnum):
     PSK_KE = 0
     PSK_DHE_KE = 1
@@ -343,7 +380,9 @@ def pull_block(buf: Buffer, capacity: int) -> Generator:
     length = int.from_bytes(buf.pull_bytes(capacity), byteorder="big")
     end = buf.tell() + length
     yield length
-    assert buf.tell() == end
+    if buf.tell() != end:
+        # There was trailing garbage or our parsing was bad.
+        raise AlertDecodeError("extra bytes at the end of a block")
 
 
 @contextmanager
@@ -411,6 +450,26 @@ def push_extension(buf: Buffer, extension_type: int) -> Generator:
         yield
 
 
+# ServerName
+
+
+def pull_server_name(buf: Buffer) -> str:
+    with pull_block(buf, 2):
+        name_type = buf.pull_uint8()
+        if name_type != NameType.HOST_NAME:
+            # We don't know this name_type.
+            raise AlertIllegalParameter(
+                f"ServerName has an unknown name type {name_type}"
+            )
+        return pull_opaque(buf, 2).decode("ascii")
+
+
+def push_server_name(buf: Buffer, server_name: str) -> None:
+    with push_block(buf, 2):
+        buf.push_uint8(NameType.HOST_NAME)
+        push_opaque(buf, 2, server_name.encode("ascii"))
+
+
 # KeyShareEntry
 
 
@@ -444,6 +503,12 @@ def push_alpn_protocol(buf: Buffer, protocol: str) -> None:
 PskIdentity = Tuple[bytes, int]
 
 
+@dataclass
+class OfferedPsks:
+    identities: List[PskIdentity]
+    binders: List[bytes]
+
+
 def pull_psk_identity(buf: Buffer) -> PskIdentity:
     identity = pull_opaque(buf, 2)
     obfuscated_ticket_age = buf.pull_uint32()
@@ -463,18 +528,34 @@ def push_psk_binder(buf: Buffer, binder: bytes) -> None:
     push_opaque(buf, 1, binder)
 
 
+def pull_offered_psks(buf: Buffer) -> OfferedPsks:
+    return OfferedPsks(
+        identities=pull_list(buf, 2, partial(pull_psk_identity, buf)),
+        binders=pull_list(buf, 2, partial(pull_psk_binder, buf)),
+    )
+
+
+def push_offered_psks(buf: Buffer, pre_shared_key: OfferedPsks) -> None:
+    push_list(
+        buf,
+        2,
+        partial(push_psk_identity, buf),
+        pre_shared_key.identities,
+    )
+    push_list(
+        buf,
+        2,
+        partial(push_psk_binder, buf),
+        pre_shared_key.binders,
+    )
+
+
 # MESSAGES
 
 Extension = Tuple[int, bytes]
 
 
 # client PSK extension内容
-@dataclass
-class OfferedPsks:
-    identities: List[PskIdentity]
-    binders: List[bytes]
-
-
 @dataclass
 class ClientHello:
     random: bytes
@@ -496,12 +577,23 @@ class ClientHello:
     other_extensions: List[Extension] = field(default_factory=list)
 
 
+def pull_handshake_type(buf: Buffer, expected_type: HandshakeType) -> None:
+    """
+    Pull the message type and assert it is the expected one.
+
+    If it is not, we have a programming error.
+    """
+    message_type = buf.pull_uint8()
+    assert message_type == expected_type
+
+
 # 这里不包括recorder header(5 bytes)
 def pull_client_hello(buf: Buffer) -> ClientHello:
     # 1 byte type, 3 bytes length
-    assert buf.pull_uint8() == HandshakeType.CLIENT_HELLO
+    pull_handshake_type(buf, HandshakeType.CLIENT_HELLO)
     with pull_block(buf, 3):
-        assert buf.pull_uint16() == TLS_VERSION_1_2
+        if buf.pull_uint16() != TLS_VERSION_1_2:
+            raise AlertDecodeError("ClientHello version is not 1.2")
 
         hello = ClientHello(
             random=buf.pull_bytes(32),
@@ -516,7 +608,9 @@ def pull_client_hello(buf: Buffer) -> ClientHello:
         def pull_extension() -> None:
             # pre_shared_key MUST be last
             nonlocal after_psk
-            assert not after_psk
+            if after_psk:
+                # the alert is Illegal Parameter per RFC 8446 section 4.2.11.
+                raise AlertIllegalParameter("PreSharedKey is not the last extension")
 
             extension_type = buf.pull_uint16()
             extension_length = buf.pull_uint16()
@@ -531,9 +625,7 @@ def pull_client_hello(buf: Buffer) -> ClientHello:
             elif extension_type == ExtensionType.PSK_KEY_EXCHANGE_MODES:
                 hello.psk_key_exchange_modes = pull_list(buf, 1, buf.pull_uint8)
             elif extension_type == ExtensionType.SERVER_NAME:
-                with pull_block(buf, 2):
-                    assert buf.pull_uint8() == 0
-                    hello.server_name = pull_opaque(buf, 2).decode("ascii")
+                hello.server_name = pull_server_name(buf)
             elif extension_type == ExtensionType.ALPN:
                 hello.alpn_protocols = pull_list(
                     buf, 2, partial(pull_alpn_protocol, buf)
@@ -541,10 +633,7 @@ def pull_client_hello(buf: Buffer) -> ClientHello:
             elif extension_type == ExtensionType.EARLY_DATA:
                 hello.early_data = True
             elif extension_type == ExtensionType.PRE_SHARED_KEY:
-                hello.pre_shared_key = OfferedPsks(
-                    identities=pull_list(buf, 2, partial(pull_psk_identity, buf)),
-                    binders=pull_list(buf, 2, partial(pull_psk_binder, buf)),
-                )
+                hello.pre_shared_key = pull_offered_psks(buf)
                 after_psk = True
             else:
                 hello.other_extensions.append(
@@ -585,9 +674,7 @@ def push_client_hello(buf: Buffer, hello: ClientHello) -> None:
 
             if hello.server_name is not None:
                 with push_extension(buf, ExtensionType.SERVER_NAME):
-                    with push_block(buf, 2):
-                        buf.push_uint8(0)
-                        push_opaque(buf, 2, hello.server_name.encode("ascii"))
+                    push_server_name(buf, hello.server_name)
 
             if hello.alpn_protocols is not None:
                 with push_extension(buf, ExtensionType.ALPN):
@@ -606,18 +693,7 @@ def push_client_hello(buf: Buffer, hello: ClientHello) -> None:
             # pre_shared_key MUST be last
             if hello.pre_shared_key is not None:
                 with push_extension(buf, ExtensionType.PRE_SHARED_KEY):
-                    push_list(
-                        buf,
-                        2,
-                        partial(push_psk_identity, buf),
-                        hello.pre_shared_key.identities,
-                    )
-                    push_list(
-                        buf,
-                        2,
-                        partial(push_psk_binder, buf),
-                        hello.pre_shared_key.binders,
-                    )
+                    push_offered_psks(buf, hello.pre_shared_key)
 
 
 @dataclass
@@ -635,9 +711,10 @@ class ServerHello:
 
 
 def pull_server_hello(buf: Buffer) -> ServerHello:
-    assert buf.pull_uint8() == HandshakeType.SERVER_HELLO
+    pull_handshake_type(buf, HandshakeType.SERVER_HELLO)
     with pull_block(buf, 3):
-        assert buf.pull_uint16() == TLS_VERSION_1_2
+        if buf.pull_uint16() != TLS_VERSION_1_2:
+            raise AlertDecodeError("ServerHello version is not 1.2")
 
         hello = ServerHello(
             random=buf.pull_bytes(32),
@@ -710,7 +787,7 @@ class NewSessionTicket:
 def pull_new_session_ticket(buf: Buffer) -> NewSessionTicket:
     new_session_ticket = NewSessionTicket()
 
-    assert buf.pull_uint8() == HandshakeType.NEW_SESSION_TICKET
+    pull_handshake_type(buf, HandshakeType.NEW_SESSION_TICKET)
     with pull_block(buf, 3):
         new_session_ticket.ticket_lifetime = buf.pull_uint32()
         new_session_ticket.ticket_age_add = buf.pull_uint32()
@@ -761,7 +838,7 @@ class EncryptedExtensions:
 def pull_encrypted_extensions(buf: Buffer) -> EncryptedExtensions:
     extensions = EncryptedExtensions()
 
-    assert buf.pull_uint8() == HandshakeType.ENCRYPTED_EXTENSIONS
+    pull_handshake_type(buf, HandshakeType.ENCRYPTED_EXTENSIONS)
     with pull_block(buf, 3):
 
         def pull_extension() -> None:
@@ -817,7 +894,7 @@ class Certificate:
 def pull_certificate(buf: Buffer) -> Certificate:
     certificate = Certificate()
 
-    assert buf.pull_uint8() == HandshakeType.CERTIFICATE
+    pull_handshake_type(buf, HandshakeType.CERTIFICATE)
     with pull_block(buf, 3):
         certificate.request_context = pull_opaque(buf, 1)
 
@@ -848,13 +925,62 @@ def push_certificate(buf: Buffer, certificate: Certificate) -> None:
 
 
 @dataclass
+class CertificateRequest:
+    request_context: bytes = b""
+    signature_algorithms: Optional[List[int]] = None
+    other_extensions: List[Tuple[int, bytes]] = field(default_factory=list)
+
+
+def pull_certificate_request(buf: Buffer) -> CertificateRequest:
+    certificate_request = CertificateRequest()
+
+    pull_handshake_type(buf, HandshakeType.CERTIFICATE_REQUEST)
+    with pull_block(buf, 3):
+        certificate_request.request_context = pull_opaque(buf, 1)
+
+        def pull_extension() -> None:
+            extension_type = buf.pull_uint16()
+            extension_length = buf.pull_uint16()
+            if extension_type == ExtensionType.SIGNATURE_ALGORITHMS:
+                certificate_request.signature_algorithms = pull_list(
+                    buf, 2, buf.pull_uint16
+                )
+            else:
+                certificate_request.other_extensions.append(
+                    (extension_type, buf.pull_bytes(extension_length))
+                )
+
+        pull_list(buf, 2, pull_extension)
+
+    return certificate_request
+
+
+def push_certificate_request(
+    buf: Buffer, certificate_request: CertificateRequest
+) -> None:
+    buf.push_uint8(HandshakeType.CERTIFICATE_REQUEST)
+    with push_block(buf, 3):
+        push_opaque(buf, 1, certificate_request.request_context)
+
+        with push_block(buf, 2):
+            with push_extension(buf, ExtensionType.SIGNATURE_ALGORITHMS):
+                push_list(
+                    buf, 2, buf.push_uint16, certificate_request.signature_algorithms
+                )
+
+            for extension_type, extension_value in certificate_request.other_extensions:
+                with push_extension(buf, extension_type):
+                    buf.push_bytes(extension_value)
+
+
+@dataclass
 class CertificateVerify:
     algorithm: int
     signature: bytes
 
 
 def pull_certificate_verify(buf: Buffer) -> CertificateVerify:
-    assert buf.pull_uint8() == HandshakeType.CERTIFICATE_VERIFY
+    pull_handshake_type(buf, HandshakeType.CERTIFICATE_VERIFY)
     with pull_block(buf, 3):
         algorithm = buf.pull_uint16()
         signature = pull_opaque(buf, 2)
@@ -877,7 +1003,7 @@ class Finished:
 def pull_finished(buf: Buffer) -> Finished:
     finished = Finished()
 
-    assert buf.pull_uint8() == HandshakeType.FINISHED
+    pull_handshake_type(buf, HandshakeType.FINISHED)
     finished.verify_data = pull_opaque(buf, 3)
 
     return finished
@@ -1128,8 +1254,10 @@ class Context:
             Union[dsa.DSAPrivateKey, ec.EllipticCurvePrivateKey, rsa.RSAPrivateKey]
         ] = None
         self.handshake_extensions: List[Extension] = []
+        self._is_client = is_client
         self._max_early_data = max_early_data
         self.session_ticket: Optional[SessionTicket] = None
+        self._request_client_certificate = False  # For test purposes only
         self._server_name = server_name
         if verify_mode is not None:
             self._verify_mode = verify_mode
@@ -1177,11 +1305,13 @@ class Context:
         self.early_data_accepted = False
         self.key_schedule: Optional[KeySchedule] = None
         self.received_extensions: Optional[List[Extension]] = None
+        self._certificate_request: Optional[CertificateRequest] = None
         self._key_schedule_psk: Optional[KeySchedule] = None
         self._key_schedule_proxy: Optional[KeyScheduleProxy] = None
         self._new_session_ticket: Optional[NewSessionTicket] = None
         self._peer_certificate: Optional[x509.Certificate] = None
         self._peer_certificate_chain: List[x509.Certificate] = []
+        self._psk_key_exchange_mode: Optional[int] = None
         self._receive_buffer = b""
         self._session_resumed = False
         self._enc_key: Optional[bytes] = None
@@ -1229,63 +1359,95 @@ class Context:
             message = self._receive_buffer[:message_length]
             self._receive_buffer = self._receive_buffer[message_length:]
 
-            input_buf = Buffer(data=message)
+            # process the message
+            try:
+                self._handle_reassembled_message(
+                    message_type=message_type,
+                    input_buf=Buffer(data=message),
+                    output_buf=output_buf,
+                )
+            except BufferReadError:
+                raise AlertDecodeError("Could not parse TLS message")
 
-            # client states
+    def _handle_reassembled_message(
+        self, message_type: int, input_buf: Buffer, output_buf: Dict[Epoch, Buffer]
+    ) -> None:
+        # client states
 
-            if self.state == State.CLIENT_EXPECT_SERVER_HELLO:
-                if message_type == HandshakeType.SERVER_HELLO:
-                    self._client_handle_hello(input_buf, output_buf[Epoch.INITIAL])
-                else:
-                    raise AlertUnexpectedMessage
-            elif self.state == State.CLIENT_EXPECT_ENCRYPTED_EXTENSIONS:
-                if message_type == HandshakeType.ENCRYPTED_EXTENSIONS:
-                    self._client_handle_encrypted_extensions(input_buf)
-                else:
-                    raise AlertUnexpectedMessage
-            elif self.state == State.CLIENT_EXPECT_CERTIFICATE_REQUEST_OR_CERTIFICATE:
-                if message_type == HandshakeType.CERTIFICATE:
-                    self._client_handle_certificate(input_buf)
-                else:
-                    # FIXME: handle certificate request
-                    raise AlertUnexpectedMessage
-            elif self.state == State.CLIENT_EXPECT_CERTIFICATE_VERIFY:
-                if message_type == HandshakeType.CERTIFICATE_VERIFY:
-                    self._client_handle_certificate_verify(input_buf)
-                else:
-                    raise AlertUnexpectedMessage
-            elif self.state == State.CLIENT_EXPECT_FINISHED:
-                if message_type == HandshakeType.FINISHED:
-                    self._client_handle_finished(input_buf, output_buf[Epoch.HANDSHAKE])
-                else:
-                    raise AlertUnexpectedMessage
-            elif self.state == State.CLIENT_POST_HANDSHAKE:
-                if message_type == HandshakeType.NEW_SESSION_TICKET:
-                    self._client_handle_new_session_ticket(input_buf)
-                else:
-                    raise AlertUnexpectedMessage
-
-            # server states
-
-            elif self.state == State.SERVER_EXPECT_CLIENT_HELLO:
-                if message_type == HandshakeType.CLIENT_HELLO:
-                    self._server_handle_hello(
-                        input_buf,
-                        output_buf[Epoch.INITIAL],
-                        output_buf[Epoch.HANDSHAKE],
-                        output_buf[Epoch.ONE_RTT],
-                    )
-                else:
-                    raise AlertUnexpectedMessage
-            elif self.state == State.SERVER_EXPECT_FINISHED:
-                if message_type == HandshakeType.FINISHED:
-                    self._server_handle_finished(input_buf, output_buf[Epoch.ONE_RTT])
-                else:
-                    raise AlertUnexpectedMessage
-            elif self.state == State.SERVER_POST_HANDSHAKE:
+        if self.state == State.CLIENT_EXPECT_SERVER_HELLO:
+            if message_type == HandshakeType.SERVER_HELLO:
+                self._client_handle_hello(input_buf, output_buf[Epoch.INITIAL])
+            else:
+                raise AlertUnexpectedMessage
+        elif self.state == State.CLIENT_EXPECT_ENCRYPTED_EXTENSIONS:
+            if message_type == HandshakeType.ENCRYPTED_EXTENSIONS:
+                self._client_handle_encrypted_extensions(input_buf)
+            else:
+                raise AlertUnexpectedMessage
+        elif self.state == State.CLIENT_EXPECT_CERTIFICATE_REQUEST_OR_CERTIFICATE:
+            if message_type == HandshakeType.CERTIFICATE:
+                self._client_handle_certificate(input_buf)
+            elif message_type == HandshakeType.CERTIFICATE_REQUEST:
+                self._client_handle_certificate_request(input_buf)
+            else:
+                raise AlertUnexpectedMessage
+        elif self.state == State.CLIENT_EXPECT_CERTIFICATE:
+            if message_type == HandshakeType.CERTIFICATE:
+                self._client_handle_certificate(input_buf)
+            else:
+                raise AlertUnexpectedMessage
+        elif self.state == State.CLIENT_EXPECT_CERTIFICATE_VERIFY:
+            if message_type == HandshakeType.CERTIFICATE_VERIFY:
+                self._client_handle_certificate_verify(input_buf)
+            else:
+                raise AlertUnexpectedMessage
+        elif self.state == State.CLIENT_EXPECT_FINISHED:
+            if message_type == HandshakeType.FINISHED:
+                self._client_handle_finished(input_buf, output_buf[Epoch.HANDSHAKE])
+            else:
+                raise AlertUnexpectedMessage
+        elif self.state == State.CLIENT_POST_HANDSHAKE:
+            if message_type == HandshakeType.NEW_SESSION_TICKET:
+                self._client_handle_new_session_ticket(input_buf)
+            else:
                 raise AlertUnexpectedMessage
 
-            assert input_buf.eof()
+        # server states
+
+        elif self.state == State.SERVER_EXPECT_CLIENT_HELLO:
+            if message_type == HandshakeType.CLIENT_HELLO:
+                self._server_handle_hello(
+                    input_buf,
+                    output_buf[Epoch.INITIAL],
+                    output_buf[Epoch.HANDSHAKE],
+                    output_buf[Epoch.ONE_RTT],
+                )
+            else:
+                raise AlertUnexpectedMessage
+        elif self.state == State.SERVER_EXPECT_CERTIFICATE:
+            if message_type == HandshakeType.CERTIFICATE:
+                self._server_handle_certificate(input_buf, output_buf[Epoch.ONE_RTT])
+            else:
+                raise AlertUnexpectedMessage
+        elif self.state == State.SERVER_EXPECT_CERTIFICATE_VERIFY:
+            if message_type == HandshakeType.CERTIFICATE_VERIFY:
+                self._server_handle_certificate_verify(
+                    input_buf, output_buf[Epoch.ONE_RTT]
+                )
+            else:
+                raise AlertUnexpectedMessage
+        elif self.state == State.SERVER_EXPECT_FINISHED:
+            if message_type == HandshakeType.FINISHED:
+                self._server_handle_finished(input_buf, output_buf[Epoch.ONE_RTT])
+            else:
+                raise AlertUnexpectedMessage
+        elif self.state == State.SERVER_POST_HANDSHAKE:
+            raise AlertUnexpectedMessage
+
+        # This condition should never be reached, because if the message
+        # contains any extra bytes, the `pull_block` inside the message
+        # parser will raise `AlertDecodeError`.
+        assert input_buf.eof()
 
     def _build_session_ticket(
         self, new_session_ticket: NewSessionTicket, other_extensions: List[Extension]
@@ -1312,6 +1474,23 @@ class Context:
             server_name=self._server_name,
             ticket=new_session_ticket.ticket,
         )
+
+    def _check_certificate_verify_signature(self, verify: CertificateVerify) -> None:
+        if verify.algorithm not in self._signature_algorithms:
+            raise AlertDecryptError(
+                "CertificateVerify has a signature algorithm we did not advertise"
+            )
+
+        try:
+            self._peer_certificate.public_key().verify(
+                verify.signature,
+                self.key_schedule.certificate_verify_data(
+                    SERVER_CONTEXT_STRING if self._is_client else CLIENT_CONTEXT_STRING
+                ),
+                *signature_algorithm_params(verify.algorithm),
+            )
+        except InvalidSignature:
+            raise AlertDecryptError
 
     def _client_send_hello(self, output_buf: Buffer) -> None:
         key_share: List[KeyShareEntry] = []
@@ -1340,6 +1519,15 @@ class Context:
 
         assert len(key_share), "no key share entries"
 
+        # Literal IPv4 and IPv6 addresses are not permitted in
+        # Server Name Indication (SNI) hostname.
+        try:
+            ipaddress.ip_address(self._server_name)
+        except ValueError:
+            server_name = self._server_name
+        else:
+            server_name = None
+
         hello = ClientHello(
             random=self.client_random,
             legacy_session_id=self.legacy_session_id,
@@ -1350,7 +1538,7 @@ class Context:
             psk_key_exchange_modes=self._psk_key_exchange_modes
             if (self.session_ticket or self.new_session_ticket_cb is not None)
             else None,
-            server_name=self._server_name,
+            server_name=server_name,
             signature_algorithms=self._signature_algorithms,
             supported_groups=supported_groups,
             supported_versions=self._supported_versions,
@@ -1415,8 +1603,14 @@ class Context:
             [peer_hello.cipher_suite],
             AlertHandshakeFailure("Unsupported cipher suite"),
         )
-        assert peer_hello.compression_method in self._legacy_compression_methods
-        assert peer_hello.supported_version in self._supported_versions
+        if peer_hello.compression_method not in self._legacy_compression_methods:
+            raise AlertIllegalParameter(
+                "ServerHello has a compression method we did not advertise"
+            )
+        if peer_hello.supported_version not in self._supported_versions:
+            raise AlertIllegalParameter(
+                "ServerHello has a version we did not advertise"
+            )
 
         # select key schedule
         if peer_hello.pre_shared_key is not None:
@@ -1484,37 +1678,23 @@ class Context:
         else:
             self._set_state(State.CLIENT_EXPECT_CERTIFICATE_REQUEST_OR_CERTIFICATE)
 
+    def _client_handle_certificate_request(self, input_buf: Buffer) -> None:
+        self._certificate_request = pull_certificate_request(input_buf)
+        self.key_schedule.update_hash(input_buf.data)
+        self._set_state(State.CLIENT_EXPECT_CERTIFICATE)
+
     def _client_handle_certificate(self, input_buf: Buffer) -> None:
         certificate = pull_certificate(input_buf)
-
-        self._peer_certificate = x509.load_der_x509_certificate(
-            certificate.certificates[0][0]
-        )
-        self._peer_certificate_chain = [
-            x509.load_der_x509_certificate(certificate.certificates[i][0])
-            for i in range(1, len(certificate.certificates))
-        ]
-
         self.key_schedule.update_hash(input_buf.data)
 
+        self._set_peer_certificate(certificate)
         self._set_state(State.CLIENT_EXPECT_CERTIFICATE_VERIFY)
 
     def _client_handle_certificate_verify(self, input_buf: Buffer) -> None:
         verify = pull_certificate_verify(input_buf)
 
-        assert verify.algorithm in self._signature_algorithms
-
         # check signature
-        try:
-            self._peer_certificate.public_key().verify(
-                verify.signature,
-                self.key_schedule.certificate_verify_data(
-                    b"TLS 1.3, server CertificateVerify"
-                ),
-                *signature_algorithm_params(verify.algorithm),
-            )
-        except InvalidSignature:
-            raise AlertDecryptError
+        self._check_certificate_verify_signature(verify)
 
         # check certificate
         if self._verify_mode != ssl.CERT_NONE:
@@ -1528,7 +1708,6 @@ class Context:
             )
 
         self.key_schedule.update_hash(input_buf.data)
-
         self._set_state(State.CLIENT_EXPECT_FINISHED)
 
     def _client_handle_finished(self, input_buf: Buffer, output_buf: Buffer) -> None:
@@ -1547,6 +1726,48 @@ class Context:
             Direction.DECRYPT, Epoch.ONE_RTT, b"s ap traffic"
         )
         next_enc_key = self.key_schedule.derive_secret(b"c ap traffic")
+
+        if self._certificate_request is not None:
+            # check whether we have a suitable signature algorithm
+            if (
+                self.certificate is not None
+                and self.certificate_private_key is not None
+            ):
+                signature_algorithm = negotiate(
+                    self._signature_algorithms_for_private_key(),
+                    self._certificate_request.signature_algorithms,
+                )
+            else:
+                signature_algorithm = None
+
+            # send certificate
+            with push_message(self.key_schedule, output_buf):
+                push_certificate(
+                    output_buf,
+                    Certificate(
+                        request_context=self._certificate_request.request_context,
+                        certificates=[
+                            (x.public_bytes(Encoding.DER), b"")
+                            for x in [self.certificate] + self.certificate_chain
+                        ]
+                        if signature_algorithm
+                        else [],
+                    ),
+                )
+
+            # send certificate verify
+            if signature_algorithm:
+                signature = self.certificate_private_key.sign(
+                    self.key_schedule.certificate_verify_data(CLIENT_CONTEXT_STRING),
+                    *signature_algorithm_params(signature_algorithm),
+                )
+                with push_message(self.key_schedule, output_buf):
+                    push_certificate_verify(
+                        output_buf,
+                        CertificateVerify(
+                            algorithm=signature_algorithm, signature=signature
+                        ),
+                    )
 
         # send finished
         with push_message(self.key_schedule, output_buf):
@@ -1578,6 +1799,39 @@ class Context:
             )
             self.new_session_ticket_cb(ticket)
 
+    def _server_expect_finished(self, onertt_buf: Buffer):
+        # anticipate client's FINISHED
+        self._expected_verify_data = self.key_schedule.finished_verify_data(
+            self._dec_key
+        )
+        buf = Buffer(capacity=64)
+        push_finished(buf, Finished(verify_data=self._expected_verify_data))
+        self.key_schedule.update_hash(buf.data)
+
+        # create a new session ticket
+        if (
+            self.new_session_ticket_cb is not None
+            and self._psk_key_exchange_mode is not None
+        ):
+            self._new_session_ticket = NewSessionTicket(
+                ticket_lifetime=86400,
+                ticket_age_add=struct.unpack("I", os.urandom(4))[0],
+                ticket_nonce=b"",
+                ticket=os.urandom(64),
+                max_early_data_size=self._max_early_data,
+            )
+
+            # send message
+            push_new_session_ticket(onertt_buf, self._new_session_ticket)
+
+            # notify application
+            ticket = self._build_session_ticket(
+                self._new_session_ticket, self.handshake_extensions
+            )
+            self.new_session_ticket_cb(ticket)
+
+        self._set_state(State.SERVER_EXPECT_FINISHED)
+
     def _server_handle_hello(
         self,
         input_buf: Buffer,
@@ -1586,23 +1840,6 @@ class Context:
         onertt_buf: Buffer,
     ) -> None:
         peer_hello = pull_client_hello(input_buf)
-
-        # determine applicable signature algorithms
-        signature_algorithms: List[SignatureAlgorithm] = []
-        if isinstance(self.certificate_private_key, rsa.RSAPrivateKey):
-            signature_algorithms = [
-                SignatureAlgorithm.RSA_PSS_RSAE_SHA256,
-                SignatureAlgorithm.RSA_PKCS1_SHA256,
-                SignatureAlgorithm.RSA_PKCS1_SHA1,
-            ]
-        elif isinstance(
-            self.certificate_private_key, ec.EllipticCurvePrivateKey
-        ) and isinstance(self.certificate_private_key.curve, ec.SECP256R1):
-            signature_algorithms = [SignatureAlgorithm.ECDSA_SECP256R1_SHA256]
-        elif isinstance(self.certificate_private_key, ed25519.Ed25519PrivateKey):
-            signature_algorithms = [SignatureAlgorithm.ED25519]
-        elif isinstance(self.certificate_private_key, ed448.Ed448PrivateKey):
-            signature_algorithms = [SignatureAlgorithm.ED448]
 
         # negotiate parameters
         cipher_suite = negotiate(
@@ -1619,7 +1856,7 @@ class Context:
             self._psk_key_exchange_modes, peer_hello.psk_key_exchange_modes
         )
         signature_algorithm = negotiate(
-            signature_algorithms,
+            self._signature_algorithms_for_private_key(),
             peer_hello.signature_algorithms,
             AlertHandshakeFailure("No supported signature algorithm"),
         )
@@ -1763,6 +2000,17 @@ class Context:
             )
 
         if pre_shared_key is None:
+            # send certificate request
+            if self._request_client_certificate:
+                with push_message(self.key_schedule, handshake_buf):
+                    push_certificate_request(
+                        handshake_buf,
+                        CertificateRequest(
+                            request_context=b"",
+                            signature_algorithms=self._signature_algorithms,
+                        ),
+                    )
+
             # send certificate
             with push_message(self.key_schedule, handshake_buf):
                 push_certificate(
@@ -1778,9 +2026,7 @@ class Context:
 
             # send certificate verify
             signature = self.certificate_private_key.sign(
-                self.key_schedule.certificate_verify_data(
-                    b"TLS 1.3, server CertificateVerify"
-                ),
+                self.key_schedule.certificate_verify_data(SERVER_CONTEXT_STRING),
                 *signature_algorithm_params(signature_algorithm),
             )
             with push_message(self.key_schedule, handshake_buf):
@@ -1808,34 +2054,32 @@ class Context:
         )
         self._next_dec_key = self.key_schedule.derive_secret(b"c ap traffic")
 
-        # anticipate client's FINISHED as we don't use client auth
-        self._expected_verify_data = self.key_schedule.finished_verify_data(
-            self._dec_key
-        )
-        buf = Buffer(capacity=64)
-        push_finished(buf, Finished(verify_data=self._expected_verify_data))
-        self.key_schedule.update_hash(buf.data)
+        self._psk_key_exchange_mode = psk_key_exchange_mode
+        if self._request_client_certificate:
+            self._set_state(State.SERVER_EXPECT_CERTIFICATE)
+        else:
+            self._server_expect_finished(onertt_buf)
 
-        # create a new session ticket
-        if self.new_session_ticket_cb is not None and psk_key_exchange_mode is not None:
-            self._new_session_ticket = NewSessionTicket(
-                ticket_lifetime=86400,
-                ticket_age_add=struct.unpack("I", os.urandom(4))[0],
-                ticket_nonce=b"",
-                ticket=os.urandom(64),
-                max_early_data_size=self._max_early_data,
-            )
+    def _server_handle_certificate(self, input_buf: Buffer, output_buf: Buffer) -> None:
+        certificate = pull_certificate(input_buf)
+        self.key_schedule.update_hash(input_buf.data)
 
-            # send message
-            push_new_session_ticket(onertt_buf, self._new_session_ticket)
+        if certificate.certificates:
+            self._set_peer_certificate(certificate)
+            self._set_state(State.SERVER_EXPECT_CERTIFICATE_VERIFY)
+        else:
+            self._server_expect_finished(output_buf)
 
-            # notify application
-            ticket = self._build_session_ticket(
-                self._new_session_ticket, self.handshake_extensions
-            )
-            self.new_session_ticket_cb(ticket)
+    def _server_handle_certificate_verify(
+        self, input_buf: Buffer, output_buf: Buffer
+    ) -> None:
+        verify = pull_certificate_verify(input_buf)
 
-        self._set_state(State.SERVER_EXPECT_FINISHED)
+        # check signature
+        self._check_certificate_verify_signature(verify)
+
+        self.key_schedule.update_hash(input_buf.data)
+        self._server_expect_finished(output_buf)
 
     def _server_handle_finished(self, input_buf: Buffer, output_buf: Buffer) -> None:
         finished = pull_finished(input_buf)
@@ -1870,7 +2114,34 @@ class Context:
             direction, epoch, self.key_schedule.cipher_suite, key
         )
 
+    def _set_peer_certificate(self, certificate: Certificate) -> None:
+        self._peer_certificate = x509.load_der_x509_certificate(
+            certificate.certificates[0][0]
+        )
+        self._peer_certificate_chain = [
+            x509.load_der_x509_certificate(certificate.certificates[i][0])
+            for i in range(1, len(certificate.certificates))
+        ]
+
     def _set_state(self, state: State) -> None:
         if self.__logger:
             self.__logger.debug("TLS %s -> %s", self.state, state)
         self.state = state
+
+    def _signature_algorithms_for_private_key(self) -> List[SignatureAlgorithm]:
+        signature_algorithms: List[SignatureAlgorithm] = []
+        if isinstance(self.certificate_private_key, rsa.RSAPrivateKey):
+            signature_algorithms = [
+                SignatureAlgorithm.RSA_PSS_RSAE_SHA256,
+                SignatureAlgorithm.RSA_PKCS1_SHA256,
+                SignatureAlgorithm.RSA_PKCS1_SHA1,
+            ]
+        elif isinstance(
+            self.certificate_private_key, ec.EllipticCurvePrivateKey
+        ) and isinstance(self.certificate_private_key.curve, ec.SECP256R1):
+            signature_algorithms = [SignatureAlgorithm.ECDSA_SECP256R1_SHA256]
+        elif isinstance(self.certificate_private_key, ed25519.Ed25519PrivateKey):
+            signature_algorithms = [SignatureAlgorithm.ED25519]
+        elif isinstance(self.certificate_private_key, ed448.Ed448PrivateKey):
+            signature_algorithms = [SignatureAlgorithm.ED448]
+        return signature_algorithms

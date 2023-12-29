@@ -5,7 +5,18 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
-from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Deque,
+    Dict,
+    FrozenSet,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from .. import tls
 from ..buffer import (
@@ -16,7 +27,8 @@ from ..buffer import (
     size_uint_var,
 )
 from . import events
-from .configuration import QuicConfiguration
+from .configuration import SMALLEST_MAX_DATAGRAM_SIZE, QuicConfiguration
+from .congestion.base import K_GRANULARITY
 from .crypto import CryptoError, CryptoPair, KeyUnavailableError
 from .logger import QuicLoggerTrace
 from .packet import (
@@ -46,12 +58,11 @@ from .packet import (
     push_quic_transport_parameters,
 )
 from .packet_builder import (
-    PACKET_MAX_SIZE,
     QuicDeliveryState,
     QuicPacketBuilder,
     QuicPacketBuilderStop,
 )
-from .recovery import K_GRANULARITY, QuicPacketRecovery, QuicPacketSpace
+from .recovery import QuicPacketRecovery, QuicPacketSpace
 from .stream import FinalSizeError, QuicStream, StreamFinishedError
 
 logger = logging.getLogger("quic")
@@ -216,6 +227,8 @@ class QuicReceiveContext:
     time: float
 
 
+QuicTokenHandler = Callable[[bytes], None]
+
 END_STATES = frozenset(
     [
         QuicConnectionState.CLOSING,
@@ -248,7 +261,12 @@ class QuicConnection:
         retry_source_connection_id: Optional[bytes] = None,
         session_ticket_fetcher: Optional[tls.SessionTicketFetcher] = None,
         session_ticket_handler: Optional[tls.SessionTicketHandler] = None,
+        token_handler: Optional[QuicTokenHandler] = None,
     ) -> None:
+        assert configuration.max_datagram_size >= SMALLEST_MAX_DATAGRAM_SIZE, (
+            "The smallest allowed maximum datagram size is "
+            f"{SMALLEST_MAX_DATAGRAM_SIZE} bytes"
+        )
         if configuration.is_client:
             assert (
                 original_destination_connection_id is None
@@ -257,6 +275,10 @@ class QuicConnection:
                 retry_source_connection_id is None
             ), "Cannot set retry_source_connection_id for a client"
         else:
+            assert token_handler is None, "Cannot set `token_handler` for a server"
+            assert (
+                configuration.token == b""
+            ), "Cannot set `configuration.token` for a server"
             assert (
                 configuration.certificate is not None
             ), "SSL certificate is required for a server"
@@ -316,7 +338,10 @@ class QuicConnection:
         self._local_max_streams_uni = Limit(
             frame_type=QuicFrameType.MAX_STREAMS_UNI, name="max_streams_uni", value=128
         )
+        self._local_next_stream_id_bidi = 0 if self._is_client else 1
+        self._local_next_stream_id_uni = 2 if self._is_client else 3
         self._loss_at: Optional[float] = None
+        self._max_datagram_size = configuration.max_datagram_size
         self._network_paths: List[QuicNetworkPath] = []
         # pacing属于流量控制机制，用于控制数据包发送速率
         self._pacing_at: Optional[float] = None
@@ -327,7 +352,7 @@ class QuicConnection:
         )
         self._peer_cid_available: List[QuicConnectionId] = []
         self._peer_cid_sequence_numbers: Set[int] = set([0])
-        self._peer_token = b""
+        self._peer_token = configuration.token
         self._quic_logger: Optional[QuicLoggerTrace] = None
         self._remote_ack_delay_exponent = 3
         self._remote_active_connection_id_limit = 2
@@ -376,7 +401,9 @@ class QuicConnection:
 
         # loss recovery
         self._loss = QuicPacketRecovery(
+            congestion_control_algorithm=configuration.congestion_control_algorithm,
             initial_rtt=configuration.initial_rtt,
+            max_datagram_size=self._max_datagram_size,
             peer_completed_address_validation=not self._is_client,
             quic_logger=self._quic_logger,
             send_probe=self._send_probe,
@@ -396,6 +423,7 @@ class QuicConnection:
         # callbacks
         self._session_ticket_fetcher = session_ticket_fetcher
         self._session_ticket_handler = session_ticket_handler
+        self._token_handler = token_handler
 
         # frame handlers
         self.__frame_handlers = {
@@ -519,6 +547,7 @@ class QuicConnection:
         builder = QuicPacketBuilder(
             host_cid=self.host_cid,
             is_client=self._is_client,
+            max_datagram_size=self._max_datagram_size,
             packet_number=self._packet_number,
             peer_cid=self._peer_cid.cid,
             peer_token=self._peer_token,
@@ -557,8 +586,11 @@ class QuicConnection:
             builder.max_flight_bytes = (
                 self._loss.congestion_window - self._loss.bytes_in_flight
             )
-            if self._probe_pending and builder.max_flight_bytes < PACKET_MAX_SIZE:
-                builder.max_flight_bytes = PACKET_MAX_SIZE
+            if (
+                self._probe_pending
+                and builder.max_flight_bytes < self._max_datagram_size
+            ):
+                builder.max_flight_bytes = self._max_datagram_size
 
             # limit data on un-validated network paths
             if not network_path.is_validated:
@@ -641,10 +673,10 @@ class QuicConnection:
         """
         Return the stream ID for the next stream created by this endpoint.
         """
-        stream_id = (int(is_unidirectional) << 1) | int(not self._is_client)
-        while stream_id in self._streams or stream_id in self._streams_finished:
-            stream_id += 4
-        return stream_id
+        if is_unidirectional:
+            return self._local_next_stream_id_uni
+        else:
+            return self._local_next_stream_id_bidi
 
     def get_timer(self) -> Optional[float]:
         """
@@ -765,7 +797,9 @@ class QuicConnection:
                 if header.destination_cid == connection_id.cid:
                     destination_cid_seq = connection_id.sequence_number
                     break
-            if self._is_client and destination_cid_seq is None:
+            if (
+                self._is_client or header.packet_type == PACKET_TYPE_HANDSHAKE
+            ) and destination_cid_seq is None:
                 if self._quic_logger is not None:
                     self._quic_logger.log_event(
                         category="transport",
@@ -807,7 +841,18 @@ class QuicConnection:
                 common = [
                     x for x in self._configuration.supported_versions if x in versions
                 ]
-                if not common:
+                chosen_version = common[0] if common else None
+                if self._quic_logger is not None:
+                    self._quic_logger.log_event(
+                        category="transport",
+                        event="version_information",
+                        data={
+                            "server_versions": versions,
+                            "client_versions": self._configuration.supported_versions,
+                            "chosen_version": chosen_version,
+                        },
+                    )
+                if chosen_version is None:
                     self._logger.error("Could not find a common protocol version")
                     self._close_event = events.ConnectionTerminated(
                         error_code=QuicErrorCode.INTERNAL_ERROR,
@@ -817,7 +862,7 @@ class QuicConnection:
                     self._close_end()
                     return
                 self._packet_number = 0
-                self._version = QuicProtocolVersion(common[0])
+                self._version = QuicProtocolVersion(chosen_version)
                 self._version_negotiation_count += 1
                 self._logger.info("Retrying with %s", self._version)
                 self._connect(now=now)
@@ -883,6 +928,7 @@ class QuicConnection:
                         )
                 return
 
+            crypto_frame_required = False
             network_path = self._find_network_path(addr)
 
             # server initialization
@@ -890,6 +936,7 @@ class QuicConnection:
                 assert (
                     header.packet_type == PACKET_TYPE_INITIAL
                 ), "first packet must be INITIAL"
+                crypto_frame_required = True
                 self._network_paths = [network_path]
                 self._version = QuicProtocolVersion(header.version)
                 self._initialize(header.destination_cid)
@@ -1017,7 +1064,7 @@ class QuicConnection:
             )
             try:
                 is_ack_eliciting, is_probing = self._payload_received(
-                    context, plain_payload
+                    context, plain_payload, crypto_frame_required=crypto_frame_required
                 )
             except QuicConnectionError as exc:
                 self._logger.warning(exc)
@@ -1208,6 +1255,21 @@ class QuicConnection:
         """
         assert self._is_client
 
+        if self._quic_logger is not None:
+            self._quic_logger.log_event(
+                category="transport",
+                event="version_information",
+                data={
+                    "client_versions": self._configuration.supported_versions,
+                    "chosen_version": self._version,
+                },
+            )
+            self._quic_logger.log_event(
+                category="transport",
+                event="alpn_information",
+                data={"client_alpns": self._configuration.alpn_protocols},
+            )
+
         self._close_at = now + self._configuration.idle_timeout
         self._initialize(self._peer_cid.cid)
 
@@ -1309,12 +1371,17 @@ class QuicConnection:
                 streams_blocked = self._streams_blocked_bidi
 
             # create stream
+            is_unidirectional = stream_is_unidirectional(stream_id)
             stream = self._streams[stream_id] = QuicStream(
                 stream_id=stream_id,
                 max_stream_data_local=max_stream_data_local,
                 max_stream_data_remote=max_stream_data_remote,
-                readable=not stream_is_unidirectional(stream_id),
+                readable=not is_unidirectional,
             )
+            if is_unidirectional:
+                self._local_next_stream_id_uni = stream_id + 4
+            else:
+                self._local_next_stream_id_bidi = stream_id + 4
 
             # mark stream as blocked if needed
             if stream_id // 4 >= max_streams:
@@ -1462,10 +1529,10 @@ class QuicConnection:
             self._loss.peer_completed_address_validation = True
 
         self._loss.on_ack_received(
-            space=self._spaces[context.epoch],
             ack_rangeset=ack_rangeset,
             ack_delay=ack_delay,
             now=context.time,
+            space=self._spaces[context.epoch],
         )
 
     def _handle_connection_close_frame(
@@ -1887,6 +1954,9 @@ class QuicConnection:
                 reason_phrase="Clients must not send NEW_TOKEN frames",
             )
 
+        if self._token_handler is not None:
+            self._token_handler(token)
+
     def _handle_padding_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
     ) -> None:
@@ -2081,6 +2151,10 @@ class QuicConnection:
         # reset the stream
         stream = self._get_or_create_stream(frame_type, stream_id)
         stream.sender.reset(error_code=QuicErrorCode.NO_ERROR)
+
+        self._events.append(
+            events.StopSendingReceived(error_code=error_code, stream_id=stream_id)
+        )
 
     def _handle_stream_frame(
         self, context: QuicReceiveContext, frame_type: int, buf: Buffer
@@ -2278,30 +2352,42 @@ class QuicConnection:
             self._retire_connection_ids.append(sequence_number)
 
     def _payload_received(
-        self, context: QuicReceiveContext, plain: bytes
+        self,
+        context: QuicReceiveContext,
+        plain: bytes,
+        crypto_frame_required: bool = False,
     ) -> Tuple[bool, bool]:
         """
         Handle a QUIC packet payload.
         """
         buf = Buffer(data=plain)
 
+        crypto_frame_found = False
         frame_found = False
         is_ack_eliciting = False
         is_probing = None
         while not buf.eof():
-            frame_type = buf.pull_uint_var()
+            # get frame type
+            try:
+                frame_type = buf.pull_uint_var()
+            except BufferReadError:
+                raise QuicConnectionError(
+                    error_code=QuicErrorCode.FRAME_ENCODING_ERROR,
+                    frame_type=None,
+                    reason_phrase="Malformed frame type",
+                )
 
             # check frame type is known
             try:
                 frame_handler, frame_epochs = self.__frame_handlers[frame_type]
             except KeyError:
                 raise QuicConnectionError(
-                    error_code=QuicErrorCode.PROTOCOL_VIOLATION,
+                    error_code=QuicErrorCode.FRAME_ENCODING_ERROR,
                     frame_type=frame_type,
                     reason_phrase="Unknown frame type",
                 )
 
-            # check frame is allowed for the epoch
+            # check frame type is allowed for the epoch
             if context.epoch not in frame_epochs:
                 raise QuicConnectionError(
                     error_code=QuicErrorCode.PROTOCOL_VIOLATION,
@@ -2325,6 +2411,9 @@ class QuicConnection:
             # update ACK only / probing flags
             frame_found = True
 
+            if frame_type == QuicFrameType.CRYPTO:
+                crypto_frame_found = True
+
             if frame_type not in NON_ACK_ELICITING_FRAME_TYPES:
                 is_ack_eliciting = True
 
@@ -2338,6 +2427,15 @@ class QuicConnection:
                 error_code=QuicErrorCode.PROTOCOL_VIOLATION,
                 frame_type=QuicFrameType.PADDING,
                 reason_phrase="Packet contains no frames",
+            )
+
+        # RFC 9000 - 17.2.2. Initial Packet
+        # The first packet sent by a client always includes a CRYPTO frame.
+        if crypto_frame_required and not crypto_frame_found:
+            raise QuicConnectionError(
+                error_code=QuicErrorCode.PROTOCOL_VIOLATION,
+                frame_type=QuicFrameType.PADDING,
+                reason_phrase="Packet contains no CRYPTO frame",
             )
 
         return is_ack_eliciting, bool(is_probing)
@@ -2476,14 +2574,16 @@ class QuicConnection:
                     frame_type=QuicFrameType.CRYPTO,
                     reason_phrase="max_ack_delay must be < 2^14",
                 )
-            if (
-                quic_transport_parameters.max_udp_payload_size is not None
-                and quic_transport_parameters.max_udp_payload_size < 1200
+            if quic_transport_parameters.max_udp_payload_size is not None and (
+                quic_transport_parameters.max_udp_payload_size
+                < SMALLEST_MAX_DATAGRAM_SIZE
             ):
                 raise QuicConnectionError(
                     error_code=QuicErrorCode.TRANSPORT_PARAMETER_ERROR,
                     frame_type=QuicFrameType.CRYPTO,
-                    reason_phrase="max_udp_payload_size must be >= 1200",
+                    reason_phrase=(
+                        f"max_udp_payload_size must be >= {SMALLEST_MAX_DATAGRAM_SIZE}"
+                    ),
                 )
 
         # store remote parameters
@@ -2540,7 +2640,7 @@ class QuicConnection:
             initial_source_connection_id=self._local_initial_source_connection_id,
             max_ack_delay=25,
             max_datagram_frame_size=self._configuration.max_datagram_frame_size,
-            quantum_readiness=b"Q" * 1200
+            quantum_readiness=b"Q" * SMALLEST_MAX_DATAGRAM_SIZE
             if self._configuration.quantum_readiness_test
             else None,
             stateless_reset_token=self._host_cids[0].stateless_reset_token,
@@ -2563,7 +2663,7 @@ class QuicConnection:
                 ),
             )
 
-        buf = Buffer(capacity=3 * PACKET_MAX_SIZE)
+        buf = Buffer(capacity=3 * self._max_datagram_size)
         push_quic_transport_parameters(buf, quic_transport_parameters)
         return buf.data
 

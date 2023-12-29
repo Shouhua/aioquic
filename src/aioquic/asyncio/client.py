@@ -1,11 +1,10 @@
 import asyncio
-import ipaddress
 import socket
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Callable, Optional, cast
 
 from ..quic.configuration import QuicConfiguration
-from ..quic.connection import QuicConnection
+from ..quic.connection import QuicConnection, QuicTokenHandler
 from ..tls import SessionTicketHandler
 from .protocol import QuicConnectionProtocol, QuicStreamHandler
 
@@ -21,6 +20,7 @@ async def connect(
     create_protocol: Optional[Callable] = QuicConnectionProtocol,
     session_ticket_handler: Optional[SessionTicketHandler] = None,
     stream_handler: Optional[QuicStreamHandler] = None,
+    token_handler: Optional[QuicTokenHandler] = None,
     wait_connected: bool = True,
     local_port: int = 0,
 ) -> AsyncGenerator[QuicConnectionProtocol, None]:
@@ -49,13 +49,6 @@ async def connect(
     loop = asyncio.get_event_loop()
     local_host = "::"
 
-    # if host is not an IP address, pass it to enable SNI
-    try:
-        ipaddress.ip_address(host)
-        server_name = None
-    except ValueError:
-        server_name = host
-
     # lookup remote address
     infos = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
     addr = infos[0][4]
@@ -66,9 +59,11 @@ async def connect(
     if configuration is None:
         configuration = QuicConfiguration(is_client=True)
     if configuration.server_name is None:
-        configuration.server_name = server_name
+        configuration.server_name = host
     connection = QuicConnection(
-        configuration=configuration, session_ticket_handler=session_ticket_handler
+        configuration=configuration,
+        session_ticket_handler=session_ticket_handler,
+        token_handler=token_handler,
     )
 
     # explicitly enable IPv4/IPv6 dual stack
