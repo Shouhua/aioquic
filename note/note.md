@@ -1,3 +1,58 @@
+## 2024-02-02
+1. aioquic中的数据重传是通过recover中的_on_packets_lost函数调用packet.delivery_handlers(QuicDeliveryState.LOST, *args)，然后在stream.py和其他文件中都有相应的handles判断不是QuicDeliveryState.ACKED的操作，重新放入缓冲，下次发送的时候就会重新发送
+2. [Congestion Control and Flow Control](https://ggn.dronacharya.info/Mtech_CSE/Downloads/QuestionBank/ISem/Data_Communication_Computer_Networks/section-3/lect1.pdf)
+- Congestion control is a global issue – involves every router and host within the subnet
+- Flow control – scope is point-to-point; involves just sender and receiver.
+
+## 2024-02-01
+### signalfd and pidfd
+https://unixism.net/2021/02/making-signals-less-painful-under-linux
+signalfd主要是将信号转化为文件描述符fd，可以使用类似epoll接口监听
+同样，pidfd可以将pid跟文件描述符fd关联，如果process退出，fd会收到可读信号，可以避免进程结束后，新进程使用旧的进程号导致的问题
+
+### openSSL error handling
+Demystifying-Cryptography-with-OpenSSL-3.0 page 111
+
+## 2024-01-23
+### 编译ngtcp2，curl
+如果运行时发现链接库有问题，首先使用ldd file查看哪些共享库链接失败
+GCC编译时如果使用外部的共享库，如果她不在默认的搜索路径(可以通过pkg-config查找下)，需要指定路径-L
+运行时，如果共享库找不到，很可能编译时路径能找到共享库，但是运行时找不到，将路径添加到LD_LIBRARY_PATH，或者在编译时设置连接器参数-Wl,rpath=/usr/local/lib64
+比如在编译ngtcp2时，系统以前装了openssl，现在又编译了quictls，前者在pkg-config的默认路径中，后者在/usr/local/lib64/pkgconfig中，这个时候通过指定PKG_CONFIG_PATH还是会指向openssl，所以需要手动指定共享库路径, **-L只会对紧随其后的-l起作用**。但是在应用运行时还是有问题，因为在运行时默认搜寻路径里面找不到，需要手动添加到链接参数中-Wl,rpath=/usr/local/lib64(这个会写入elf文件中)，或者指定LD_LIBRARY_PATH=/usr/local/lib64
+https://en.wikipedia.org/wiki/Rpath
+
+1. 使用quictls，由于quictls是基于openssl，因此编译quictls后生成的共享库使用类似libssl.so.81.3
+```shell
+PKG_CONFIG_PATH=/usr/local/lib64 pkg-config --variables=pc_path pkg-config
+# openssl的共享库地址，pkg-config默认路径中包含 
+ls -l /usr/lib/x86_64-linux-gnu | grep -E 'libssl|libcrypto'
+# quictls共享库地址
+ls -l /usr/local/lib64 | grep -E 'libssl|libcrypto'
+```
+编译应用时，默认使用了openssl的共享库(-lssl)，但是也只是报警，说与所依赖的libssl.so.81.3不一致，运行时就会报错。
+gcc编译时手动指定-L，并且在运行时指定rpath(可以通过readelf查看)，因为运行时寻找共享库也有默认地址，gcc编译时，pkg-config寻找共享库地址
+```shell
+pkg-config --variables=pc_path pkg-config
+
+```
+
+## 2024-01-19
+### QUIC中使用的tls1.3不同点
+1. tls中处理的是headshake header和payload，没有原先的record，取而代之是quic long/short header
+2. 传入client initial header中的dcid作为初始key计算，后面tls层计算除各种加解密的对称密钥封装
+
+### Ubuntu中history多个ssh终端无法共享
+```shell
+# Avoid duplicates
+HISTSIZE=1000
+HISTFILESIZE=1000
+HISTCONTROL="ignoreboth:erasedups"
+# When the shell exits, append to the history file instead of overwriting it
+shopt -s histappend
+
+# After each command, append to the history file and reread it
+PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}history -a; history -c; history -r"
+```
 ## 2023-11-23
 ### Bash中的set builtin
 1. 一般在新建脚本时候，都会使用set设置shell配置，比如 `set -eEuo pipefail`，其中的 `-e` 用于设置发生错误时立即退出脚本。如果有`trap 'cmd' ERR`，会先执行`cmd`再退出脚本。如果没有`-e`，`cmd`执行后会继续执行后面脚本，除非`cmd`里面有退出脚本的命令，比如`exit`。但是有些命令返回不为0也并不意味着发生错误，因此需要绕过这类，主要有以下几种方式：
@@ -557,7 +612,7 @@ With basic (BRE) syntax, these characters do not have special meaning unless pre
 
 ## 2023-09-29
 ### QUIC加解密用到的cid
-1. **计算密钥时要用到的cid，如果没有retry packet的话，使用client发送的最初initial packetd中的destination cid。如果发生retry，则在下次client initial packet中使用这个scid作为dcid，并且server和client都以此作为加解密使用的cid。** retry packet中的source cid必须是自己选择的，不能与前面的client initial packet中的destination cid相同，这个跟version negotiation不同
+1. **计算密钥时要用到的cid，如果没有retry packet的话，使用client发送initial packet中的destination cid。如果发生retry，则在下次client initial packet中使用这个scid作为dcid，并且server和client都以此作为加解密使用的cid。** retry packet中的source cid必须是自己选择的，不能与前面的client initial packet中的destination cid相同，这个跟version negotiation不同
 2. [version negotiation destination cid和source cid必须跟client initial packet中的source cid和destination cid保持一致](https://github.com/alibaba/xquic/blob/main/docs/translation/rfc9000-transport-zh.md#1721-%E7%89%88%E6%9C%AC%E5%8D%8F%E5%95%86%E5%8C%85version-negotiation-packet)
 
 ## 2023-09-27

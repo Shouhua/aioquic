@@ -69,7 +69,7 @@ class QuicPacketPacer:
             K_MICRO_SECOND, min(self._max_datagram_size / pacing_rate, K_SECOND)
         )
 
-        # bucket_max最大的传输速率
+        # bucket_max最大的传输时间, bucket_time表示使用了bucket_max里面的时间
         self.bucket_max = (
             max(
                 2 * self._max_datagram_size,
@@ -108,7 +108,7 @@ class QuicPacketRecovery:
 
         # loss detection
         self._pto_count = 0  # Probe Timeout
-        self._rtt_initial = initial_rtt # 0.1 second
+        self._rtt_initial = initial_rtt  # 0.1 second
         self._rtt_initialized = False
         self._rtt_latest = 0.0
         self._rtt_min = math.inf

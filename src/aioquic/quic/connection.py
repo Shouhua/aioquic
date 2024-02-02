@@ -193,7 +193,7 @@ class QuicConnectionAdapter(logging.LoggerAdapter):
 class QuicConnectionId:
     cid: bytes
     sequence_number: int
-    stateless_reset_token: bytes = b"" # 此token跟connection id关联
+    stateless_reset_token: bytes = b""  # 此token跟connection id关联
     was_sent: bool = False
 
 
@@ -1404,7 +1404,6 @@ class QuicConnection:
         self._session_ticket_handler(session_ticket)
 
     def _initialize(self, peer_cid: bytes) -> None:
-        logger.info(f"用于tls加解密的peer_cid: {peer_cid}")
         # TLS
         self.tls = tls.Context(
             alpn_protocols=self._configuration.alpn_protocols,

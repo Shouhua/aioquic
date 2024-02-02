@@ -3,7 +3,7 @@ from typing import Any, Dict, Iterable, Optional, Protocol
 
 from ..packet_builder import QuicSentPacket
 
-K_GRANULARITY = 0.001  # seconds
+K_GRANULARITY = 0.001  # seconds 1ms
 K_INITIAL_WINDOW = 10
 K_MINIMUM_WINDOW = 2
 
