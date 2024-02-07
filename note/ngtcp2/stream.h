@@ -14,9 +14,7 @@ struct _stream
 	size_t sent_offset;
 	size_t acked_offset;
 
-	char *data;
-	size_t datalen;
-	size_t nwrite;
+	struct list_head link; // 用于connection中的streams
 };
 
 typedef struct _stream stream;
@@ -44,7 +42,16 @@ void stream_free(stream *s)
 {
 	if (!s)
 		return;
-	list_del(s);
+
+	struct list_head *el, *el1;
+	list_for_each_safe(el, el1, &s->buffer)
+	{
+		stream_data *sd = list_entry(el, stream_data, link);
+		if (sd->data)
+			free(sd->data);
+		list_del(el);
+		free(sd);
+	}
 	free(s);
 }
 
@@ -58,7 +65,7 @@ int stream_push_data(stream *s, const uint8_t *data, size_t data_size)
 	stream_data *sd = (stream_data *)malloc(sizeof(stream_data));
 	sd->data = data;
 	sd->data_size = data_size;
-	list_add_tail(stream_data, s->buffer);
+	list_add_tail(stream_data, &s->buffer);
 	return 0;
 }
 
