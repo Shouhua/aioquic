@@ -5,7 +5,9 @@ EXE = $(patsubst %.c, %, ${SRC})
 # CREF=-Wl,--cref
 TRACE=-Wl,--trace # 打印GCC搜寻共享库目录
 RPATH=-Wl,-rpath=/usr/local/lib64
-CFLAGS= -g -Wall -Wextra -pedantic \
+PEDANTIC=-pedantic
+CFLAGS= -g -Wall -Wextra \
+	${PEDANTIC} \
 	${RPATH} \
 	# ${CREF} \
 	# ${TRACE} 
@@ -26,6 +28,9 @@ build_dir:
 
 run: client
 	./build/client "/home/shouhua/project/aioquic/tests/pycacert.pem"
+
+debug: client
+	gdb --args ./build/client "/home/shouhua/project/aioquic/tests/pycacert.pem"
 
 clean: 
 	rm -rfv build
