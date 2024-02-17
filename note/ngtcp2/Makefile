@@ -11,6 +11,8 @@ CFLAGS= -g -Wall -Wextra \
 	${RPATH} \
 	# ${CREF} \
 	# ${TRACE} 
+
+# quictls(openssl)
 LDFLAGS=-L/usr/local/lib64 
 
 .PHONY: build_dir all

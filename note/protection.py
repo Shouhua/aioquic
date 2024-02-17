@@ -1,19 +1,21 @@
-import struct
 import binascii
-from typing import Tuple
+import struct
 from enum import IntEnum
+from typing import Tuple
 
+from cryptography.hazmat.backends.openssl.backend import backend
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
-from cryptography.hazmat.backends.openssl.backend import backend
 
 # https://blog.unasuke.com/2021/read-quic-initial-packet-by-ruby/
+
 
 class CipherSuite(IntEnum):
     AES_128_GCM_SHA256 = 0x1301
     AES_256_GCM_SHA384 = 0x1302
     CHACHA20_POLY1305_SHA256 = 0x1303
     EMPTY_RENEGOTIATION_INFO_SCSV = 0x00FF
+
 
 CIPHER_SUITES = {
     CipherSuite.AES_128_GCM_SHA256: (b"aes-128-ecb", b"aes-128-gcm"),
@@ -35,6 +37,15 @@ PN_MAX_SIZE = 4
 IV_LEN = 12
 
 LONG_CLIENT_PACKET_NUMBER = 2
+# c 1100 inital packet & fixed bits
+# 3 packet_number-1
+# 00000001 quic version
+# 08 destination cid length
+# 8394c8f03e515708  destination cid
+# 00 source id length
+# 00 token length
+# 449e variable-length encoding(4 | 49a(1182)) for 4 bytes packet number+1162 frames+16 auth tag
+# 00000002 packet number
 LONG_CLIENT_PLAIN_HEADER = binascii.unhexlify(
     "c300000001088394c8f03e5157080000449e00000002"
 )
@@ -109,7 +120,9 @@ LONG_SERVER_PROTECTED_PACKET = binascii.unhexlify(
 )
 
 SHORT_SERVER_PACKET_NUMBER = 3
-SHORT_INITIAL_SECRET = binascii.unhexlify("310281977cb8c1c1c1212d784b2d29e5a6489e23de848d370a5a2f9537f3a100")
+SHORT_INITIAL_SECRET = binascii.unhexlify(
+    "310281977cb8c1c1c1212d784b2d29e5a6489e23de848d370a5a2f9537f3a100"
+)
 SHORT_SERVER_PLAIN_HEADER = binascii.unhexlify("41b01fd24a586a9cf30003")
 SHORT_SERVER_PLAIN_PAYLOAD = binascii.unhexlify(
     "06003904000035000151805a4bebf5000020b098c8dc4183e4c182572e10ac3e"
@@ -128,7 +141,9 @@ CHACHA20_CLIENT_PLAIN_PAYLOAD = binascii.unhexlify("01")
 CHACHA20_CLIENT_ENCRYPTED_PACKET = binascii.unhexlify(
     "4cfe4189655e5cd55c41f69080575d7999c25a5bfb"
 )
-CHACHA_INITIAL_SECRET = binascii.unhexlify("9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b")
+CHACHA_INITIAL_SECRET = binascii.unhexlify(
+    "9ac312a7f877468ebe69422748ad00a15443f18203a07d6060f688f30f21632b"
+)
 
 
 def hkdf_label(label: bytes, hash_value: bytes, length: int) -> bytes:
@@ -139,6 +154,7 @@ def hkdf_label(label: bytes, hash_value: bytes, length: int) -> bytes:
         + struct.pack("!B", len(hash_value))
         + hash_value
     )
+
 
 def hkdf_expand_label(
     algorithm: hashes.HashAlgorithm,
@@ -153,6 +169,7 @@ def hkdf_expand_label(
         info=hkdf_label(label, hash_value, length),
     ).derive(secret)
 
+
 def hkdf_extract(
     algorithm: hashes.HashAlgorithm, salt: bytes, key_material: bytes
 ) -> bytes:
@@ -160,8 +177,10 @@ def hkdf_extract(
     h.update(key_material)
     return h.finalize()
 
+
 def cipher_suite_hash(cipher_suite: CipherSuite) -> hashes.HashAlgorithm:
     return CIPHER_SUITES_HASH[cipher_suite]()
+
 
 def derive_key_iv_hp(
     cipher_suite: CipherSuite, secret: bytes
@@ -180,6 +199,7 @@ def derive_key_iv_hp(
         hkdf_expand_label(algorithm, secret, b"quic hp", b"", key_size),
     )
 
+
 # 为了增加随机性, 让每次AEAD加密跟packet number关联
 def generate_nonce(iv: bytes, pn: int) -> bytes:
     nonce = list(iv)
@@ -188,11 +208,28 @@ def generate_nonce(iv: bytes, pn: int) -> bytes:
         nonce[IV_LEN - 8 + i] ^= padding_pn[i]
     return bytes(nonce)
 
-def encrypt_packet(is_client: bool, algorithm: hashes.HashAlgorithm, cipher_suite: CipherSuite, cid: bytes, pn: int, pn_size: int, plain_header: bytes, plain_payload: bytes, secret: bytes = None) -> bytes:
+
+def encrypt_packet(
+    is_client: bool,
+    algorithm: hashes.HashAlgorithm,
+    cipher_suite: CipherSuite,
+    cid: bytes,
+    pn: int,
+    pn_size: int,
+    plain_header: bytes,
+    plain_payload: bytes,
+    secret: bytes = None,
+) -> bytes:
     initial_secret = hkdf_extract(algorithm, initial_salt, cid)
     # 客户端 用于发送数据使用的密钥
     if secret == None:
-        app_initial_secret = hkdf_expand_label(algorithm, initial_secret, b"client in" if is_client else b"server in", b"", 32)
+        app_initial_secret = hkdf_expand_label(
+            algorithm,
+            initial_secret,
+            b"client in" if is_client else b"server in",
+            b"",
+            algorithm.digest_size,
+        )
     else:
         app_initial_secret = secret
     key, iv, hp = derive_key_iv_hp(cipher_suite, app_initial_secret)
@@ -201,17 +238,17 @@ def encrypt_packet(is_client: bool, algorithm: hashes.HashAlgorithm, cipher_suit
 
     hp_cipher_name, aead_cipher_name = CIPHER_SUITES[cipher_suite]
 
-    evp_cipher = backend._lib.EVP_get_cipherbyname(aead_cipher_name)    
+    evp_cipher = backend._lib.EVP_get_cipherbyname(aead_cipher_name)
     backend.openssl_assert(evp_cipher != backend._ffi.NULL)
     ctx = backend._lib.EVP_CIPHER_CTX_new()
     ctx = backend._ffi.gc(ctx, backend._lib.EVP_CIPHER_CTX_free)
     res = backend._lib.EVP_CipherInit_ex(
         ctx,
         evp_cipher,
-        backend._ffi.NULL, # ENGINE *impl
-        backend._ffi.from_buffer(key), # unsigned char *key
-        backend._ffi.from_buffer(nonce), # unsigned char *iv
-        1, # int enc
+        backend._ffi.NULL,  # ENGINE *impl
+        backend._ffi.from_buffer(key),  # unsigned char *key
+        backend._ffi.from_buffer(nonce),  # unsigned char *iv
+        1,  # int enc
     )
     backend.openssl_assert(res != 0)
 
@@ -221,16 +258,12 @@ def encrypt_packet(is_client: bool, algorithm: hashes.HashAlgorithm, cipher_suit
         backend._ffi.NULL,
         outlen,
         backend._ffi.from_buffer(plain_header),
-        len(plain_header)
+        len(plain_header),
     )
     backend.openssl_assert(res != 0)
     buf = backend._ffi.new("unsigned char[]", len(plain_payload))
     res = backend._lib.EVP_CipherUpdate(
-        ctx, 
-        buf, 
-        outlen, 
-        backend._ffi.from_buffer(plain_payload), 
-        len(plain_payload)
+        ctx, buf, outlen, backend._ffi.from_buffer(plain_payload), len(plain_payload)
     )
     backend.openssl_assert(res != 0)
     processed_data = backend._ffi.buffer(buf, outlen[0])[:]
@@ -247,7 +280,7 @@ def encrypt_packet(is_client: bool, algorithm: hashes.HashAlgorithm, cipher_suit
     protected_payload = processed_data + tag
 
     # header加密
-    header_evp_cipher = backend._lib.EVP_get_cipherbyname(hp_cipher_name)    
+    header_evp_cipher = backend._lib.EVP_get_cipherbyname(hp_cipher_name)
     ctx = backend._lib.EVP_CIPHER_CTX_new()
     backend.openssl_assert(evp_cipher != backend._ffi.NULL)
     ctx = backend._ffi.gc(ctx, backend._lib.EVP_CIPHER_CTX_free)
@@ -258,56 +291,58 @@ def encrypt_packet(is_client: bool, algorithm: hashes.HashAlgorithm, cipher_suit
     res = backend._lib.EVP_CipherInit_ex(
         ctx,
         header_evp_cipher,
-        backend._ffi.NULL, # ENGINE *impl
-        backend._ffi.from_buffer(hp), # unsigned char *key
-        backend._ffi.from_buffer(sample) if cipher_suite == CipherSuite.CHACHA20_POLY1305_SHA256 else backend._ffi.NULL, # unsigned char *iv
-        1, # int enc
+        backend._ffi.NULL,  # ENGINE *impl
+        backend._ffi.from_buffer(hp),  # unsigned char *key
+        backend._ffi.from_buffer(sample)
+        if cipher_suite == CipherSuite.CHACHA20_POLY1305_SHA256
+        else backend._ffi.NULL,  # unsigned char *iv
+        1,  # int enc
     )
     maskbuf = backend._ffi.new("unsigned char[]", 16)
     masklen = backend._ffi.new("int *")
     zero = binascii.unhexlify("0000000000")
     if cipher_suite == CipherSuite.CHACHA20_POLY1305_SHA256:
         res = backend._lib.EVP_CipherUpdate(
-            ctx, 
-            maskbuf,
-            masklen, 
-            backend._ffi.from_buffer(zero), len(zero))
-    else: 
+            ctx, maskbuf, masklen, backend._ffi.from_buffer(zero), len(zero)
+        )
+    else:
         res = backend._lib.EVP_CipherUpdate(
-            ctx, 
-            maskbuf,
-            masklen, 
-            backend._ffi.from_buffer(sample), len(sample))
+            ctx, maskbuf, masklen, backend._ffi.from_buffer(sample), len(sample)
+        )
     mask = backend._ffi.buffer(maskbuf, masklen[0])[:]
     header_list = list(plain_header)
-    header_list[0] ^= mask[0] & (0x0f if header_list[0] & 0x80 else 0x1f) # mask packet number length
+    header_list[0] ^= mask[0] & (
+        0x0F if header_list[0] & 0x80 else 0x1F
+    )  # mask packet number length
     pn_offset = len(plain_header) - pn_size
     for i in range(pn_size):
-        header_list[pn_offset+i] ^= mask[i+1] # mask packet number
+        header_list[pn_offset + i] ^= mask[i + 1]  # mask packet number
     protected_header = bytes([header_list[i] for i in range(len(header_list))])
     # if is_client == False:
     # if cipher_suite == CipherSuite.CHACHA20_POLY1305_SHA256:
-        # print(f'initial secret: {binascii.hexlify(app_initial_secret)}')
-        # print(f'key: {binascii.hexlify(key)}')
-        # print(f'iv: {binascii.hexlify(iv)}')
-        # print(f'hp: {binascii.hexlify(hp)}')
-        # print(f'nonce: {binascii.hexlify(nonce)}')
-        # print(f'protected payload: {binascii.hexlify(protected_payload)}')
-        # print(f'sample: {binascii.hexlify(sample)}')
-        # print(f'mask: {binascii.hexlify(mask)}')
-        # print(f'protected header: {binascii.hexlify(protected_header)}')
+    # print(f'initial secret: {binascii.hexlify(app_initial_secret)}')
+    # print(f'key: {binascii.hexlify(key)}')
+    # print(f'iv: {binascii.hexlify(iv)}')
+    # print(f'hp: {binascii.hexlify(hp)}')
+    # print(f'nonce: {binascii.hexlify(nonce)}')
+    # print(f'protected payload: {binascii.hexlify(protected_payload)}')
+    # print(f'sample: {binascii.hexlify(sample)}')
+    # print(f'mask: {binascii.hexlify(mask)}')
+    # print(f'protected header: {binascii.hexlify(protected_header)}')
     return protected_header + protected_payload
+
 
 def main():
     client_protected_packet = encrypt_packet(
-        True, 
-        hashes.SHA256(), 
+        True,
+        hashes.SHA256(),
         CipherSuite.AES_128_GCM_SHA256,
         cid,
-        LONG_CLIENT_PACKET_NUMBER, 
+        LONG_CLIENT_PACKET_NUMBER,
         4,
         LONG_CLIENT_PLAIN_HEADER,
-        LONG_CLIENT_PLAIN_PAYLOAD)
+        LONG_CLIENT_PLAIN_PAYLOAD,
+    )
     if client_protected_packet == LONG_PROTECTED_PACKET:
         print("client long packet proteced正确")
     else:
@@ -321,7 +356,7 @@ def main():
         LONG_SERVER_PACKET_NUMBER,
         2,
         LONG_SERVER_PLAIN_HEADER,
-        LONG_SERVER_PLAIN_PAYLOAD
+        LONG_SERVER_PLAIN_PAYLOAD,
     )
     if server_protected_packet == LONG_SERVER_PROTECTED_PACKET:
         print("server long packet proteced正确")
@@ -337,13 +372,12 @@ def main():
         2,
         SHORT_SERVER_PLAIN_HEADER,
         SHORT_SERVER_PLAIN_PAYLOAD,
-        SHORT_INITIAL_SECRET
+        SHORT_INITIAL_SECRET,
     )
     if short_server_protected_packet == SHORT_SERVER_ENCRYPTED_PACKET:
         print("short server packet proteced正确")
     else:
         print("short server packet proteced错误")
-
 
     chacha20_short_server_protected_packet = encrypt_packet(
         None,
@@ -354,12 +388,13 @@ def main():
         3,
         CHACHA20_CLIENT_PLAIN_HEADER,
         CHACHA20_CLIENT_PLAIN_PAYLOAD,
-        CHACHA_INITIAL_SECRET
+        CHACHA_INITIAL_SECRET,
     )
     if chacha20_short_server_protected_packet == CHACHA20_CLIENT_ENCRYPTED_PACKET:
         print("chacha20 short server packet proteced正确")
     else:
         print("chacha20 short server packet proteced错误")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

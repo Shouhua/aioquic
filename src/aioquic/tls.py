@@ -454,11 +454,15 @@ def push_extension(buf: Buffer, extension_type: int) -> Generator:
 
 
 # ServerName
-
-
+# 00 00 - 表示这是 "服务器名称指示" 扩展
+# 00 18 - 扩展信息长度为 0x18(24) 字节
+# 00 16 - 第一个(也是唯一的)列表条目长度为 0x16(22) 字节
+# 00 - 0x00 表示这是 "主机名" 列表
+# 00 13 - 主机名列表的长度为 0x13(19) 字节
+# 65 78 61 ... 6e 65 74 - 主机名："example.ulfheim.net"
 def pull_server_name(buf: Buffer) -> str:
-    with pull_block(buf, 2):
-        name_type = buf.pull_uint8()
+    with pull_block(buf, 2): # 上面的 00 16
+        name_type = buf.pull_uint8() # 00 表示主机名
         if name_type != NameType.HOST_NAME:
             # We don't know this name_type.
             raise AlertIllegalParameter(
@@ -478,7 +482,12 @@ def push_server_name(buf: Buffer, server_name: str) -> None:
 
 KeyShareEntry = Tuple[int, bytes]
 
-
+# 00 33 - 表示这是 "算法公钥列表" 扩展
+# 00 26 - 扩展信息长度为 0x26(38) 字节
+# 00 24 - 算法公钥列表长度为 0x24(36) 字节
+# 00 1d - 代表 x25519 算法(例子中为通过 curve25519 算法进行密钥交换)
+# 00 20 - 公钥长度为 0x20(32) 字节
+# 35 80 ... 62 54 - "客户端准备密钥交换" 步骤中生成的公钥
 def pull_key_share(buf: Buffer) -> KeyShareEntry:
     group = buf.pull_uint16()
     data = pull_opaque(buf, 2)
@@ -490,7 +499,7 @@ def push_key_share(buf: Buffer, value: KeyShareEntry) -> None:
     push_opaque(buf, 2, value[1])
 
 
-# ALPN
+# ALPN(Application-Layer Protocol Negotiation)
 
 
 def pull_alpn_protocol(buf: Buffer) -> str:
@@ -511,7 +520,24 @@ class OfferedPsks:
     identities: List[PskIdentity]
     binders: List[bytes]
 
-
+# struct {
+#           opaque identity<1..2^16-1>;
+#           uint32 obfuscated_ticket_age;
+#       } PskIdentity;
+# 
+#       opaque PskBinderEntry<32..255>;
+# 
+#       struct {
+#           PskIdentity identities<7..2^16-1>;
+#           PskBinderEntry binders<33..2^16-1>;
+#       } OfferedPsks;
+# 
+#       struct {
+#           select (Handshake.msg_type) {
+#               case client_hello: OfferedPsks;
+#               case server_hello: uint16 selected_identity;
+#           };
+#       } PreSharedKeyExtension;
 def pull_psk_identity(buf: Buffer) -> PskIdentity:
     identity = pull_opaque(buf, 2)
     obfuscated_ticket_age = buf.pull_uint32()
@@ -523,6 +549,8 @@ def push_psk_identity(buf: Buffer, entry: PskIdentity) -> None:
     buf.push_uint32(entry[1])
 
 
+# 每个binder使用1个字节表示长度
+# opaque PskBinderEntry<32..255>;
 def pull_psk_binder(buf: Buffer) -> bytes:
     return pull_opaque(buf, 1)
 

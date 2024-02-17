@@ -1,3 +1,6 @@
+/**
+ * TODO acked_stream_data_offset 按道理说，stream data应该知道对端ack后才能删除
+ */
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -317,7 +320,8 @@ int handle_timer(struct client *c)
 	if (ret < 0)
 	{
 		fprintf(stderr, "ngtcp2_conn_handle_expiry: %s\n", ngtcp2_strerror((int)ret));
-		return EXIT_FAILURE;
+		exit(EXIT_SUCCESS);
+		// return EXIT_FAILURE;
 	}
 	ret = connection_write(c);
 	if (ret < 0)
@@ -564,6 +568,23 @@ int recv_stream_data_cb(ngtcp2_conn *conn __attribute__((unused)),
 	return 0;
 }
 
+int handle_handshake_completed(ngtcp2_conn *conn, void *userdata)
+{
+	(void)userdata;
+	ngtcp2_duration timeout;
+	const ngtcp2_transport_params *params;
+	params = ngtcp2_conn_get_remote_transport_params(conn);
+	if (!params)
+	{
+		fprintf(stderr, "没有服务端transport params\n");
+		return NGTCP2_ERR_CALLBACK_FAILURE;
+	}
+
+	timeout = params->max_idle_timeout == 0 ? 0 : params->max_idle_timeout / NGTCP2_SECONDS - 1;
+	ngtcp2_conn_set_keep_alive_timeout(conn, timeout * NGTCP2_SECONDS);
+	return 0;
+}
+
 int client_quic_init(struct client *c,
 					 struct sockaddr *remote_addr,
 					 socklen_t remote_addrlen,
@@ -598,6 +619,7 @@ int client_quic_init(struct client *c,
 		.recv_stream_data = recv_stream_data_cb,
 		.rand = rand_cb,
 		.get_new_connection_id = get_new_connection_id_cb,
+		.handshake_completed = handle_handshake_completed,
 	};
 	ngtcp2_cid dcid, scid;
 	ngtcp2_settings settings;
@@ -628,7 +650,7 @@ int client_quic_init(struct client *c,
 	params.initial_max_streams_uni = 3;
 	params.initial_max_stream_data_bidi_local = 128 * 1024;
 	params.initial_max_data = 1024 * 1024;
-	// params.max_idle_timeout = 10 * NGTCP2_SECONDS;
+	params.max_idle_timeout = 9 * NGTCP2_SECONDS;
 
 	rv = ngtcp2_conn_client_new(&c->conn, &dcid, &scid, &path, NGTCP2_PROTO_VER_V1,
 								&callbacks, &settings, &params, NULL, c);
@@ -640,7 +662,7 @@ int client_quic_init(struct client *c,
 
 	ngtcp2_conn_set_tls_native_handle(c->conn, c->ssl);
 
-	ngtcp2_conn_set_keep_alive_timeout(c->conn, 59 * NGTCP2_SECONDS);
+	// ngtcp2_conn_set_keep_alive_timeout(c->conn, 9 * NGTCP2_SECONDS);
 
 	return 0;
 }

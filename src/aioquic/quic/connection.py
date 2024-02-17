@@ -57,11 +57,7 @@ from .packet import (
     push_ack_frame,
     push_quic_transport_parameters,
 )
-from .packet_builder import (
-    QuicDeliveryState,
-    QuicPacketBuilder,
-    QuicPacketBuilderStop,
-)
+from .packet_builder import QuicDeliveryState, QuicPacketBuilder, QuicPacketBuilderStop
 from .recovery import QuicPacketRecovery, QuicPacketSpace
 from .stream import FinalSizeError, QuicStream, StreamFinishedError
 
@@ -633,9 +629,11 @@ class QuicConnection:
                                 "packet_type": self._quic_logger.packet_type(
                                     packet.packet_type
                                 ),
-                                "scid": dump_cid(self.host_cid)
-                                if is_long_header(packet.packet_type)
-                                else "",
+                                "scid": (
+                                    dump_cid(self.host_cid)
+                                    if is_long_header(packet.packet_type)
+                                    else ""
+                                ),
                                 "dcid": dump_cid(self._peer_cid.cid),
                             },
                             "raw": {"length": packet.sent_bytes},
@@ -1075,7 +1073,19 @@ class QuicConnection:
                 return
 
             # update idle timeout
-            self._close_at = now + self._configuration.idle_timeout
+            idle_timeout = self._configuration.idle_timeout
+            if (
+                self._remote_max_idle_timeout != 0
+                and self._remote_max_idle_timeout < self._configuration.idle_timeout
+            ):
+                idle_timeout = self._remote_max_idle_timeout
+            self._logger.info(
+                f"calccccccccccccccccc idle_timeout: {idle_timeout}, {self._remote_max_idle_timeout}, {self._configuration.idle_timeout}"
+            )
+
+            self._close_at = now + idle_timeout
+
+            # self._close_at = now + self._configuration.idle_timeout
 
             # handle migration
             if (
@@ -1315,7 +1325,9 @@ class QuicConnection:
         stream = self._streams.get(stream_id, None)
         if stream is None:
             # check initiator
-            if stream_is_client_initiated(stream_id) == self._is_client:
+            if (
+                stream_is_client_initiated(stream_id) == self._is_client
+            ):  # TODO 为什么???
                 raise QuicConnectionError(
                     error_code=QuicErrorCode.STREAM_STATE_ERROR,
                     frame_type=frame_type,
@@ -1349,6 +1361,7 @@ class QuicConnection:
                 stream_id=stream_id,
                 max_stream_data_local=max_stream_data_local,
                 max_stream_data_remote=max_stream_data_remote,
+                # 收到对端数据时，如果是单向stream，本端肯定不能写
                 writable=not stream_is_unidirectional(stream_id),
             )
         return stream
@@ -2649,9 +2662,11 @@ class QuicConnection:
             initial_source_connection_id=self._local_initial_source_connection_id,
             max_ack_delay=25,
             max_datagram_frame_size=self._configuration.max_datagram_frame_size,
-            quantum_readiness=b"Q" * SMALLEST_MAX_DATAGRAM_SIZE
-            if self._configuration.quantum_readiness_test
-            else None,
+            quantum_readiness=(
+                b"Q" * SMALLEST_MAX_DATAGRAM_SIZE
+                if self._configuration.quantum_readiness_test
+                else None
+            ),
             stateless_reset_token=self._host_cids[0].stateless_reset_token,
         )
         if not self._is_client:

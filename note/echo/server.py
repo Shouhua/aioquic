@@ -128,7 +128,7 @@ if __name__ == "__main__":
     )
 
     configuration.load_cert_chain(args.certificate, args.private_key)
-    # configuration.idle_timeout = 10
+    configuration.idle_timeout = 10
 
     try:
         asyncio.run(

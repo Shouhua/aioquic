@@ -29,10 +29,7 @@ from aioquic.quic.packet import (
     encode_quic_version_negotiation,
     push_quic_transport_parameters,
 )
-from aioquic.quic.packet_builder import (
-    QuicDeliveryState,
-    QuicPacketBuilder,
-)
+from aioquic.quic.packet_builder import QuicDeliveryState, QuicPacketBuilder
 from aioquic.quic.recovery import QuicPacketPacer
 
 from .utils import (
@@ -2813,6 +2810,79 @@ class QuicConnectionTest(TestCase):
                 }
             ],
         )
+
+    def test_connect_timeout(self):
+        """
+        Check connection is timeout.
+        """
+
+        client_configuration = QuicConfiguration(is_client=True)
+        client_configuration.max_idle_timeout = 10
+
+        client = QuicConnection(configuration=client_configuration)
+        client._ack_delay = 0
+
+        server_configuration = QuicConfiguration(is_client=False)
+        server_configuration.load_cert_chain(SERVER_CERTFILE, SERVER_KEYFILE)
+        server_configuration.max_idle_timeout = 9
+
+        server = QuicConnection(
+            configuration=server_configuration,
+            original_destination_connection_id=client.original_destination_connection_id,
+        )
+        server._ack_delay = 0
+
+        # client sends INITIAL
+        now = 0.0
+        client.connect(SERVER_ADDR, now=now)
+        items = client.datagrams_to_send(now=now)
+        self.assertEqual(datagram_sizes(items), [1200])
+        self.assertEqual(client.get_timer(), 0.2)
+
+        # # INITIAL is lost
+        # now = client.get_timer()
+        # client.handle_timer(now=now)
+        # items = client.datagrams_to_send(now=now)
+        # self.assertEqual(datagram_sizes(items), [1200])
+        # self.assertAlmostEqual(client.get_timer(), 0.6)
+
+        # # server receives INITIAL, sends INITIAL + HANDSHAKE
+        # now += TICK
+        # server.receive_datagram(items[0][0], CLIENT_ADDR, now=now)
+        # items = server.datagrams_to_send(now=now)
+        # self.assertEqual(datagram_sizes(items), [1200, 1148])
+        # self.assertAlmostEqual(server.get_timer(), 0.45)
+        # self.assertEqual(len(server._loss.spaces[0].sent_packets), 1)
+        # self.assertEqual(len(server._loss.spaces[1].sent_packets), 2)
+        # self.assertEqual(type(server.next_event()), events.ProtocolNegotiated)
+        # self.assertIsNone(server.next_event())
+
+        # # handshake continues normally
+        # now += TICK
+        # client.receive_datagram(items[0][0], SERVER_ADDR, now=now)
+        # client.receive_datagram(items[1][0], SERVER_ADDR, now=now)
+        # items = client.datagrams_to_send(now=now)
+        # self.assertEqual(datagram_sizes(items), [376])
+        # self.assertAlmostEqual(client.get_timer(), 0.625)
+        # self.assertEqual(type(client.next_event()), events.ProtocolNegotiated)
+        # self.assertEqual(type(client.next_event()), events.HandshakeCompleted)
+        # self.assertEqual(type(client.next_event()), events.ConnectionIdIssued)
+
+        # now += TICK
+        # server.receive_datagram(items[0][0], CLIENT_ADDR, now=now)
+        # items = server.datagrams_to_send(now=now)
+        # self.assertEqual(datagram_sizes(items), [229])
+        # self.assertAlmostEqual(server.get_timer(), 0.625)
+        # self.assertEqual(len(server._loss.spaces[0].sent_packets), 0)
+        # self.assertEqual(len(server._loss.spaces[1].sent_packets), 0)
+        # self.assertEqual(type(server.next_event()), events.HandshakeCompleted)
+        # self.assertEqual(type(server.next_event()), events.ConnectionIdIssued)
+
+        # now += TICK
+        # client.receive_datagram(items[0][0], SERVER_ADDR, now=now)
+        # items = client.datagrams_to_send(now=now)
+        # self.assertEqual(datagram_sizes(items), [32])
+        # self.assertAlmostEqual(client.get_timer(), 60.4)  # idle timeout
 
 
 class QuicNetworkPathTest(TestCase):
