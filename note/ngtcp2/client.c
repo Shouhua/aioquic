@@ -1,6 +1,3 @@
-/**
- * TODO acked_stream_data_offset 按道理说，stream data应该知道对端ack后才能删除
- */
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>

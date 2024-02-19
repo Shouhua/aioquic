@@ -46,5 +46,6 @@ int connection_start(Connection *conn);
 int connection_read(Connection *conn);
 int connection_write(Connection *conn);
 void connection_close(Connection *conn, uint64_t error_code);
+void connection_set_socket_fd(Connection *conn, int fd);
 
 #endif

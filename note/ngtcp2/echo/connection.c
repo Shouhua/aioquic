@@ -332,3 +332,8 @@ void connection_close(Connection *conn, uint64_t error_code)
 
 	conn->is_closed = 1;
 }
+
+void connection_set_socket_fd(Connection *conn, int fd)
+{
+	conn->sock_fd = fd;
+}

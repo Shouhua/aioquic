@@ -1,4 +1,6 @@
 SHELL := /bin/bash
+# PROJECT_ROOT_DIR := $(shell pwd)
+PROJECT_ROOT_DIR := /home/shouhua/project/aioquic
 SRC = $(wildcard *.c)
 CLIENT_SRC = $(filter-out server.c, ${SRC})
 SERVER_SRC = $(filter-out client.c, ${SRC})
@@ -10,7 +12,7 @@ EXE=client server
 TRACE=-Wl,--trace # 打印GCC搜寻共享库目录
 RPATH=-Wl,-rpath=/usr/local/lib64
 PEDANTIC=-pedantic
-CFLAGS= -g -Wall -Wextra \
+CFLAGS= -g -Wall -Wextra -DDEBUG\
 	${PEDANTIC} \
 	${RPATH} \
 	# ${CREF} \
@@ -25,38 +27,37 @@ all: build_dir client server
 build_dir: 
 	@mkdir -p build
 
-client: ${CLIENT_SRC}
+client: build_dir ${CLIENT_SRC}
 	@gcc ${CFLAGS} -o build/$@ ${CLIENT_SRC}  \
 		${LDFLAGS} \
 		-lssl -lcrypto \
 		-lngtcp2 -lngtcp2_crypto_quictls
 
 run_client: client
-	./build/client "localhost" "4433" "/home/shouhua/project/aioquic/tests/pycacert.pem"
+	@SSLKEYLOGFILE="${PROJECT_ROOT_DIR}/keylog.txt" ./build/client "localhost" "4433" "${PROJECT_ROOT_DIR}/tests/pycacert.pem"
 
 debug_client: client
-	gdb --args ./build/client "localhost" "4433" \
-	"/home/shouhua/project/aioquic/tests/pycacert.pem"
+	@SSLKEYLOGFILE="${PROJECT_ROOT_DIR}/keylog.txt" gdb --args ./build/client "localhost" "4433" \
+	"${PROJECT_ROOT_DIR}/tests/pycacert.pem"
 
-server: ${SERVER_SRC}
+server: build_dir ${SERVER_SRC}
 	@gcc ${CFLAGS} -o build/$@ ${SERVER_SRC}  \
 		${LDFLAGS} \
 		-lssl -lcrypto \
 		-lngtcp2 -lngtcp2_crypto_quictls
-	
-debug_server: server
-	@gdb --args ./build/server localhost 4433 "/home/shouhua/project/aioquic/tests/ssl_cert.pem" "/home/shouhua/project/aioquic/tests/ssl_key.pem"
 
 run_server: server
-	@./build/server localhost 4433 "/home/shouhua/project/aioquic/tests/ssl_cert.pem" "/home/shouhua/project/aioquic/tests/ssl_key.pem"
+	@./build/server localhost 4433 "${PROJECT_ROOT_DIR}/tests/ssl_cert.pem" "${PROJECT_ROOT_DIR}/tests/ssl_key.pem"
+	
+debug_server: server
+	@gdb --args ./build/server localhost 4433 "${PROJECT_ROOT_DIR}/tests/ssl_cert.pem" "${PROJECT_ROOT_DIR}/tests/ssl_key.pem"
 
-run: server client
-	if tmux has-session -t quic 2>/dev/null; then tmux kill-session -t quic; fi; \
-	tmux new-session -t "quic" -d; \
-	tmux send-keys -t quic:0 "cd ~/project/aioquic/note/ngtcp2/echo" C-m; \
-	tmux split-window -t quic -v; \
+run: all
+	@if tmux has-session -t quic > /dev/null 2>&1; then tmux kill-session -t quic; fi; \
+	tmux new-session -s quic -c ${PROJECT_ROOT_DIR}/note/ngtcp2/echo -d; \
+	tmux split-window -t quic -v -l 10; \
 	tmux send-keys -t quic:0.0 "make run_server" C-m; \
-	sleep 1; \
+	sleep 0.5; \
 	tmux send-keys -t quic:0.1 "make run_client" C-m; \
 	if [[ -z "$$TMUX" ]]; then tmux attach-session -t quic; else tmux switch-client -t quic; fi;
 

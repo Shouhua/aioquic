@@ -64,7 +64,7 @@ int resolve_and_bind(const char *host, const char *port,
 
 	for (rp = result; rp != NULL; rp = rp->ai_next)
 	{
-		fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+		fd = socket(rp->ai_family, rp->ai_socktype | SOCK_NONBLOCK, rp->ai_protocol);
 		if (fd == -1)
 			continue;
 

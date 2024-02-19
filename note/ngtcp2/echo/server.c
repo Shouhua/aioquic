@@ -1,12 +1,12 @@
+#include <errno.h>
+#include <ngtcp2/ngtcp2.h>
 #include <stdio.h>
 #include <string.h>
-#include <errno.h>
 #include <sys/epoll.h>
-#include <ngtcp2/ngtcp2.h>
 
 #include "connection.h"
-#include "quictls.h"
 #include "list.h"
+#include "quictls.h"
 #include "utils.h"
 
 #define MAX_EVENTS 64
@@ -181,11 +181,9 @@ static Connection *accept_connection(Server *server,
 	params.initial_max_streams_bidi = 3;
 	params.initial_max_stream_data_bidi_local = 128 * 1024;
 	params.initial_max_stream_data_bidi_remote = 128 * 1024;
-	params.max_idle_timeout = 60 * NGTCP2_SECONDS;
+	params.max_idle_timeout = 10 * NGTCP2_SECONDS;
 	params.initial_max_data = 1024 * 1024;
-	// memcpy(&params.original_dcid, &header.dcid, sizeof(params.original_dcid));
 	params.original_dcid = header.dcid;
-
 	params.original_dcid_present = 1;
 
 	ngtcp2_cid scid;
@@ -249,7 +247,6 @@ static Connection *find_connection(Server *server, const uint8_t *dcid, size_t d
 			if (dcid_size == scids[i].datalen && memcmp(dcid, scids[i].data, dcid_size) == 0)
 			{
 				free(scids);
-				fprintf(stdout, "找到connection\n");
 				return connection;
 			}
 		}
@@ -280,15 +277,10 @@ static int handle_incoming(Server *server)
 			return -1;
 		}
 
-		// uint32_t version;
-		// const uint8_t *dcid, *scid;
-		// size_t dcidlen, scidlen;
-
 		ngtcp2_version_cid version_cid;
-
 		ret = ngtcp2_pkt_decode_version_cid(&version_cid,
 											buf, n_read,
-											NGTCP2_MAX_CIDLEN);
+											NGTCP2_MIN_INITIAL_DCIDLEN);
 		if (ret < 0)
 		{
 			fprintf(stderr, "ngtcp2_pkt_decode_version_cid: %s\n",
@@ -296,7 +288,6 @@ static int handle_incoming(Server *server)
 			return -1;
 		}
 
-		/* Find any existing connection by DCID */
 		Connection *connection = find_connection(server, version_cid.dcid, version_cid.dcidlen);
 		if (!connection)
 		{
@@ -345,8 +336,6 @@ static int handle_incoming(Server *server)
 				perror("epoll_ctl EPOLL_CTL_DEL timer_fd");
 				return -1;
 			}
-			// connection_set_socket_fd(connection, -1);
-			connection_free(connection);
 
 			struct list_head *el, *el1;
 			list_for_each_safe(el, el1, &server->connections)
@@ -355,6 +344,9 @@ static int handle_incoming(Server *server)
 				if (ci->connection == connection)
 				{
 					list_del(el);
+					connection_close(connection, NGTCP2_APPLICATION_ERROR);
+					connection_set_socket_fd(connection, -1);
+					connection_free(connection);
 					free(ci);
 				}
 			}
@@ -424,7 +416,20 @@ static int run(Server *server)
 						ret = ngtcp2_conn_handle_expiry(conn, timestamp());
 						if (ret < 0)
 						{
-							fprintf(stderr, "ngtcp2_conn_handle_expiry: %s\n", ngtcp2_strerror(ret));
+							fprintf(stderr, "超时触发，释放连接, ngtcp2_conn_handle_expiry: %s\n", ngtcp2_strerror(ret));
+							ret = epoll_ctl(server->epoll_fd, EPOLL_CTL_DEL,
+											connection_get_timer_fd(connection),
+											NULL);
+							if (ret < 0)
+							{
+								perror("epoll_ctl EPOLL_CTL_DEL timer_fd");
+								return -1;
+							}
+							list_del(el);
+							connection_close(connection, NGTCP2_APPLICATION_ERROR);
+							connection_set_socket_fd(connection, -1);
+							connection_free(connection);
+							free(connection_item);
 							continue;
 						}
 
@@ -441,7 +446,7 @@ int main(int argc, char *argv[])
 	// server HOST PORT CERT KEY
 	if (argc != 5)
 	{
-		fprintf(stderr, "server PORT CERT KEY\n");
+		fprintf(stderr, "server HOST PORT CERT KEY\n");
 		return -1;
 	}
 	Server server = {
@@ -451,6 +456,7 @@ int main(int argc, char *argv[])
 		.cert = argv[3],
 		.key = argv[4],
 	};
+	init_list_head(&server.connections);
 
 	server.sock_fd = resolve_and_bind(
 		argv[1],
@@ -462,8 +468,6 @@ int main(int argc, char *argv[])
 		fprintf(stderr, "resolve_and_bind failed\n");
 		return -1;
 	}
-
-	init_list_head(&server.connections);
 
 	ngtcp2_settings_default(&server.settings);
 	server.settings.initial_ts = timestamp();

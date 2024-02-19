@@ -3,6 +3,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/epoll.h>
+#include <signal.h>
+#include <sys/signalfd.h>
 
 #include "connection.h"
 #include "quictls.h"
@@ -12,6 +14,8 @@
 #define MAX_STREAMS 10
 #define MAX_EVENTS 64
 
+int ssl_userdata_idx;
+
 typedef struct
 {
 	Connection *connection;
@@ -20,6 +24,9 @@ typedef struct
 	size_t stream_index;
 	size_t n_coalescing;
 	size_t coalesce_count;
+	char *keylogfile;
+
+	int sig_fd;
 } Client;
 
 void rand_cb(uint8_t *dest, size_t destlen,
@@ -245,12 +252,78 @@ static int handle_stdin(Client *client)
 	return 0;
 }
 
+int setup_sig(int epoll_fd)
+{
+	sigset_t mask;
+	int sig_fd;
+	/*
+	 * Setup SIGALRM to be delivered via SignalFD
+	 * */
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGQUIT);
+	/*
+	 * Block these signals so that they are not handled
+	 * in the usual way. We want them to be handled via
+	 * SignalFD.
+	 * */
+	if (sigprocmask(SIG_BLOCK, &mask, NULL) == -1)
+	{
+		perror("sigprocmask");
+		return -1;
+	}
+	sig_fd = signalfd(-1, &mask, 0);
+	if (sig_fd == -1)
+	{
+		perror("signalfd");
+		return -1;
+	}
+
+	struct epoll_event ev;
+	ev.events = EPOLLIN | EPOLLET;
+	ev.data.fd = sig_fd;
+	if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sig_fd, &ev) == -1)
+	{
+		close(sig_fd);
+		perror("epoll_ctl EPOLL_CTL_ADD sig_fd");
+		return -1;
+	}
+	return sig_fd;
+}
+
+int handle_sig(Client *c)
+{
+	struct signalfd_siginfo sfd_si;
+	if (read(c->sig_fd, &sfd_si, sizeof(struct signalfd_siginfo)) == -1)
+		return -1;
+
+#ifdef DEBUG
+	if (sfd_si.ssi_signo == SIGQUIT)
+	{
+		fprintf(stdout, "QUIT信号触发\n");
+	}
+	if (sfd_si.ssi_signo == SIGINT)
+	{
+		fprintf(stdout, "INT信号触发\n");
+	}
+#endif
+
+	if (c->connection)
+	{
+		connection_close(c->connection, NGTCP2_APPLICATION_ERROR);
+		connection_free(c->connection);
+	}
+	// TODO free client
+	exit(0);
+}
+
 static int run(Client *client)
 {
 	struct epoll_event ev;
 	int epoll_fd = -1;
 	int sock_fd = -1;
 	int timer_fd = -1;
+	int sig_fd = -1;
 
 	epoll_fd = epoll_create1(0);
 	if (epoll_fd == -1)
@@ -258,6 +331,13 @@ static int run(Client *client)
 		perror("epoll_create1");
 		return -1;
 	}
+
+	sig_fd = setup_sig(epoll_fd);
+	if (sig_fd < 0)
+	{
+		return -1;
+	}
+	client->sig_fd = sig_fd;
 
 	if (setup_stdin(epoll_fd) < 0)
 	{
@@ -298,6 +378,11 @@ static int run(Client *client)
 
 		for (int n = 0; n < nfds; n++)
 		{
+			if (events[n].data.fd == sig_fd)
+			{
+				if (handle_sig(client) < 0)
+					return -1;
+			}
 			if (events[n].data.fd == sock_fd)
 			{
 				if (events[n].events & EPOLLIN)
@@ -332,6 +417,45 @@ static int run(Client *client)
 	return 0;
 }
 
+void keylog_callback(const SSL *ssl, const char *line)
+{
+	int res;
+
+	char *keylogfile_path = (char *)SSL_get_ex_data(ssl, ssl_userdata_idx);
+	if (!keylogfile_path)
+	{
+		fprintf(stderr, "keylogfile_path为空\n");
+		return;
+	}
+
+#ifdef DEBUG
+	fprintf(stdout, "keylogfile path: %s\n", keylogfile_path);
+#endif
+
+	int keylogfile = open(keylogfile_path, O_WRONLY | O_APPEND);
+	if (keylogfile == -1)
+	{
+		perror("open keylogfile");
+		exit(-1);
+	}
+
+	res = write(keylogfile, line, strlen(line));
+	if (res == -1)
+	{
+		perror("write keylogfile line");
+		close(keylogfile);
+		exit(-1);
+	}
+	res = write(keylogfile, "\n", 1);
+	if (res == -1)
+	{
+		perror("write keylogfile nextline");
+		close(keylogfile);
+		exit(-1);
+	}
+	close(keylogfile);
+}
+
 int main(int argc, char *argv[])
 {
 	if (argc != 4)
@@ -354,7 +478,10 @@ int main(int argc, char *argv[])
 			.stream_index = 0,
 			.n_coalescing = 0,
 			.coalesce_count = 0,
+			.keylogfile = NULL,
 		};
+
+	client.keylogfile = getenv("SSLKEYLOGFILE");
 
 	struct sockaddr_storage local_addr, remote_addr;
 	size_t local_addrlen = sizeof(local_addr), remote_addrlen;
@@ -388,6 +515,17 @@ int main(int argc, char *argv[])
 	{
 		fprintf(stderr, "ssl_new failed\n");
 		return -1;
+	}
+
+	if (client.keylogfile)
+	{
+		SSL_CTX_set_keylog_callback(ssl_ctx, keylog_callback);
+		ssl_userdata_idx = SSL_get_ex_new_index(0, NULL, NULL, NULL, NULL);
+		if (SSL_set_ex_data(ssl, ssl_userdata_idx, client.keylogfile) == 0)
+		{
+			fprintf(stderr, "SSL_set_ex_data failed\n");
+			return -1;
+		}
 	}
 
 	Connection *conn = connection_new(sock_fd, ssl_ctx, ssl);
@@ -443,7 +581,7 @@ int main(int argc, char *argv[])
 	ngtcp2_settings_default(&settings);
 
 	settings.initial_ts = timestamp();
-	// settings.log_printf = log_printf;
+	settings.log_printf = log_printf;
 
 	ngtcp2_transport_params_default(&params);
 
