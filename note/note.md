@@ -1,5 +1,84 @@
+## 2024-02-20
+### [quic-echo](./ngtcp2/echo), 使用ngtcp2实现server echo client发送的信息, 依赖tmux, 详情见[Makefile](./ngtcp2/echo/Makefile)
+
+### [quictls](https://github.com/quictls/openssl)编译运行问题
+环境: Ubuntu 22.04.4 LTS, gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0<br>  
+[编译quictls](https://curl.se/docs/http3.html)后, quictls默认的openssl命令位于`/usr/local/bin/openssl`, 默认安装的openssl位于`/usr/bin/openssl`, 环境变量PATH中也是按照这个目录顺序, 所以如果键入`openssl version`, 使用的是quictls版本的`openssl`命令, 这时会报错:<br>
+```openssl: error while loading shared libraries: libssl.so.81.3: cannot open shared object file: No such file or directory```<br>
+问题原因是openssl在运行时找不到依赖的动态库, 使用`ldd`命令可以看下哪些依赖库没有找到:<br>
+```shell
+ldd $(which openssl)
+     linux-vdso.so.1 (0x00007fff7****000)
+     libssl.so.81.3 => not found
+     libcrypto.so.81.3 => not found
+     libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fb650****00)
+     /lib64/ld-linux-x86-64.so.2 (0x00007fb65****000)
+
+```
+可以看到`libssl.so.81.3`和`libcrypto.so.81.3`找不到, 官方OpenSSL的动态库是`libssl.so.3`和`libcrypto.so.3`, 位于`/usr/lib/x86_64-linux-gnu`, 前者中 **81** 是 **Q** 的ASCII码值, 以示区分:<br>
+```shell
+ls -l /usr/lib/x86_64-linux-gnu | grep -E 'libssl|libcrypto'
+     -rw-r--r--  1 root root   9098630  2月  1 02:43 libcrypto.a
+     lrwxrwxrwx  1 root root        14  2月  1 02:43 libcrypto.so -> libcrypto.so.3
+     -rw-r--r--  1 root root   4451632  2月  1 02:43 libcrypto.so.3
+     -rw-r--r--  1 root root    418464  2月 17  2023 libssl3.so
+     -rw-r--r--  1 root root   1231268  2月  1 02:43 libssl.a
+     lrwxrwxrwx  1 root root        11  2月  1 02:43 libssl.so -> libssl.so.3
+     -rw-r--r--  1 root root    667864  2月  1 02:43 libssl.so.3
+```
+通过阅读[ld.so的manpage文档](https://man7.org/linux/man-pages/man8/ld.so.8.html), 如果共享库没有包含slash, 按照以下的顺序寻找, 下面是原文:<br>
+```
+If a shared object dependency does not contain a slash, then it is searched for in the following order:
+(1)  Using the directories specified in the DT_RPATH dynamic section attribute of the binary if present and DT_RUNPATH attribute does not exist.  Use of DT_RPATH is deprecated.
+
+(2)  Using the environment variable LD_LIBRARY_PATH, unless the executable is being run in secure-execution mode (see below), in which case this variable is ignored.
+
+(3)  Using the directories specified in the DT_RUNPATH dynamic section attribute of the binary if present.  Such directories are searched only to find those objects required by DT_NEEDED (direct dependencies) entries and do not apply to those objects' children, which must themselves have their own DT_RUNPATH entries.  This is unlike DT_RPATH, which is applied to searches for all children in the dependency tree.
+
+(4)  From the cache file /etc/ld.so.cache, which contains a compiled list of candidate shared objects previously found in the augmented library path.  If, however, the binary was linked with the -z nodefaultlib linker option, shared objects in the default paths are skipped.  Shared objects installed in hardware capability directories (see below) are preferred to other shared objects.
+
+(5)  In the default path /lib, and then /usr/lib.  (On some 64-bit architectures, the default paths for 64-bit shared objects are /lib64, and then /usr/lib64.)  If the binary was linked with the -z nodefaultlib linker option, this step is skipped.
+```
+1. 设置ELF文件的DT_RPATH, 上面文档指出这个参数过时了, 但是依然很多在使用。编译时指定GCC的相关参数, 比如`-Wl,-rpath=/usr/local/lib64`, 默认情况下文档说是设置`DT_RPATH`,
+```
+man 1 ld
+...
+--enable-new-dtags
+--disable-new-dtags
+     This linker can create the new dynamic tags in ELF. But the older ELF systems may not understand them. If you specify --enable-new-dtags, the new dynamic tags will be created as needed and
+     older dynamic tags will be omitted.  If you specify --disable-new-dtags, no new dynamic tags will be created. By default, the new dynamic tags are not created. Note that those options are only
+     available for ELF systems.
+...
+```
+ 但是在我机器 `Ubuntu22.04, GCC11.04` 验证是默认设置的`DT_RUNPATH`, 如果要设置`DT_RPATH`, 可以显式设置关闭开关`-Wl,--disable-new-dtags`, 编译完成后可以使用如下命令检验: <br>
+```shell
+readelf -d build/client | grep -E 'RUNPATH|RPATH'
+```
+2. 可以设置`LD_LIBRARY_PATH`, 比如`LD_LIBRARY_PATH="/usr/local/lib64" openssl version`也能正确运行
+3. 设置DT_RUNPATH, 方法同1, 但是需要她的使用顺序以及她只应用与DT_NEEDED的依赖库, 他们的子依赖不会使用这个参数指定的地址, 这也是争议的地方, DT_RPATH说是过时了, 而且存在安全争议, 但是在检索第一位管用
+4. /etc/ld.so.cache本地缓存, 这个需要在机器上自己设置, 一般在目录 `/etc/ld.so.conf.d/` 添加配置文件, 然后刷新缓存: <br>
+```shell
+echo "/usr/local/lib64" | sudo tee /etc/ld.so.conf.d/quictls.conf # 添加配置文件
+sudo ldconfig # 刷新 ld.so.cache
+openssl version # 现在能正常执行
+# OpenSSL 3.1.4+quic 24 Oct 2023 (Library: OpenSSL 3.1.4+quic 24 Oct 2023)
+```
+上面是检索顺序也是解决前面问题的方法。下面根据QUIC-ECHO工程依赖quictls的例子解释下GCC编译参数, 具体可以参见相关的 [Makefile](./ngtcp2/echo/Makefile) :<br>
+```shell
+gcc -g -Wall -Wextra -DDEBUG -pedantic -Wl,-rpath=/usr/local/lib64  -o build/client client.c connection.c quictls.c stream.c utils.c  \
+        -L/usr/local/lib64  \ # 影响后面的-lssl -lcrypto, 使她们使用quictls而不是openssl的共享库
+        -lssl -lcrypto \ # libssl.so.81.3 libcrypto.so.81.3
+        -lngtcp2 -lngtcp2_crypto_quictls
+```
+**\[TIPS]**: ld 默认搜索的动态库路径可以通过如下途径查看:<br>
+```shell
+ld --verbose | grep SEARCH_DIR | tr -s ' ;' '\n'
+# OR
+ldconfig -v 2>/dev/null | grep '^/'
+```
+
 ## 2024-02-02
-1. aioquic中的数据重传是通过recover中的_on_packets_lost函数调用packet.delivery_handlers(QuicDeliveryState.LOST, *args)，然后在stream.py和其他文件中都有相应的handles判断不是QuicDeliveryState.ACKED的操作，重新放入缓冲，下次发送的时候就会重新发送
+1. aioquic中的数据重传是通过recover中的_on_packets_lost函数调用packet.delivery_handlers(QuicDeliveryState.LOST, *args), 然后在stream.py和其他文件中都有相应的handles判断不是QuicDeliveryState.ACKED的操作, 重新放入缓冲, 下次发送的时候就会重新发送
 2. [Congestion Control and Flow Control](https://ggn.dronacharya.info/Mtech_CSE/Downloads/QuestionBank/ISem/Data_Communication_Computer_Networks/section-3/lect1.pdf)
 - Congestion control is a global issue – involves every router and host within the subnet
 - Flow control – scope is point-to-point; involves just sender and receiver.
@@ -7,39 +86,48 @@
 ## 2024-02-01
 ### signalfd and pidfd
 https://unixism.net/2021/02/making-signals-less-painful-under-linux
-signalfd主要是将信号转化为文件描述符fd，可以使用类似epoll接口监听
-同样，pidfd可以将pid跟文件描述符fd关联，如果process退出，fd会收到可读信号，可以避免进程结束后，新进程使用旧的进程号导致的问题
+signalfd主要是将信号转化为文件描述符fd, 可以使用类似epoll接口监听
+同样, pidfd可以将pid跟文件描述符fd关联, 如果process退出, fd会收到可读信号, 可以避免进程结束后, 新进程使用旧的进程号导致的问题
 
 ### openSSL error handling
 Demystifying-Cryptography-with-OpenSSL-3.0 page 111
 
 ## 2024-01-23
-### 编译ngtcp2，curl
-如果运行时发现链接库有问题，首先使用ldd file查看哪些共享库链接失败
-GCC编译时如果使用外部的共享库，如果她不在默认的搜索路径(可以通过pkg-config查找下)，需要指定路径-L
-运行时，如果共享库找不到，很可能编译时路径能找到共享库，但是运行时找不到，将路径添加到LD_LIBRARY_PATH，或者在编译时设置连接器参数-Wl,rpath=/usr/local/lib64
-比如在编译ngtcp2时，系统以前装了openssl，现在又编译了quictls，前者在pkg-config的默认路径中，后者在/usr/local/lib64/pkgconfig中，这个时候通过指定PKG_CONFIG_PATH还是会指向openssl，所以需要手动指定共享库路径, **-L只会对紧随其后的-l起作用**。但是在应用运行时还是有问题，因为在运行时默认搜寻路径里面找不到，需要手动添加到链接参数中-Wl,rpath=/usr/local/lib64(这个会写入elf文件中)，或者指定LD_LIBRARY_PATH=/usr/local/lib64
-https://en.wikipedia.org/wiki/Rpath
-
-1. 使用quictls，由于quictls是基于openssl，因此编译quictls后生成的共享库使用类似libssl.so.81.3
+### 编译ngtcp2, curl
+如果运行时发现链接库有问题, 首先使用`ldd file`查看哪些共享库链接找不到
+GCC编译使用外部的共享库, 有两种情况需要考虑, 但是都可以通过`-L`指定路径解决, 比如 `-L/usr/local/lib64 -lssl -lcrypto`, 明确说明`libssl`和`libcrypto`在`/usr/local/lib64`搜索。
+1. 不在默认的搜索路径(可以通过如下查找默认路径)
 ```shell
-PKG_CONFIG_PATH=/usr/local/lib64 pkg-config --variables=pc_path pkg-config
-# openssl的共享库地址，pkg-config默认路径中包含 
+ld --verbose | grep SEARCH_DIR | tr -s ' ;' '\n'
+# OR
+ldconfig -v 2>/dev/null | grep '^/'
+```
+2. 存在两个一样的共享库，需要解决冲突, 明确指定引用的库路径
+运行时, 如果共享库找不到, 很可能编译时路径能找到共享库, 但是运行时找不到, 将路径添加到 `LD_LIBRARY_PATH`, 或者在编译时设置连接器参数 `-Wl,rpath=/usr/local/lib64` 设置elf文件的[`DT_RPATH`或者`DT_RUNPATH`](https://en.wikipedia.org/wiki/Rpath)。
+
+### pkg-config
+`pkg-config`跟`ld`不一样，前者用于给出编译时的链接参数，有时候使用编译工具时很方便给出`libs`和`includes`。quictls编译后生成的共享库有`libssl.so.81.3`, 其中 **81** 为 **Q** 的ASCII码值，用于区别官方openssl的共享库。
+```shell
+pkg-config --variable=pc_path pkg-config | tr ':' '\n' # pkg-config默认搜索路径, PKG_CONFIG_PATH对这个路径没有影响
+
+PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig pkg-config --libs libssl # 先检索PKG_CONFIG_PATH, 如果检索不到，在检索默认路径
+# -L/usr/local/lib64 -lssl
+
+pkg-config --libs libssl
+# -lssl
+
+# openssl的共享库地址, pkg-config默认路径中包含 
 ls -l /usr/lib/x86_64-linux-gnu | grep -E 'libssl|libcrypto'
 # quictls共享库地址
 ls -l /usr/local/lib64 | grep -E 'libssl|libcrypto'
 ```
-编译应用时，默认使用了openssl的共享库(-lssl)，但是也只是报警，说与所依赖的libssl.so.81.3不一致，运行时就会报错。
-gcc编译时手动指定-L，并且在运行时指定rpath(可以通过readelf查看)，因为运行时寻找共享库也有默认地址，gcc编译时，pkg-config寻找共享库地址
-```shell
-pkg-config --variables=pc_path pkg-config
-
-```
+编译应用时, 默认使用了openssl的共享库(-lssl), 但是也只是报警, 说与所依赖的libssl.so.81.3不一致, 运行时就会报错库冲突了。
+gcc编译时手动指定-L, 并且在运行时指定rpath(可以通过readelf查看), 因为运行时寻找共享库也有默认地址, gcc编译时, pkg-config寻找共享库地址
 
 ## 2024-01-19
 ### QUIC中使用的tls1.3不同点
-1. tls中处理的是headshake header和payload，没有原先的record，取而代之是quic long/short header
-2. 传入client initial header中的dcid作为初始key计算，后面tls层计算除各种加解密的对称密钥封装
+1. tls中处理的是headshake header和payload, 没有原先的record, 取而代之是quic long/short header
+2. 传入client initial header中的dcid作为初始key计算, 后面tls层计算除各种加解密的对称密钥封装
 
 ### Ubuntu中history多个ssh终端无法共享
 ```shell
@@ -55,12 +143,12 @@ PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND$'\n'}history -a; history -c; h
 ```
 ## 2023-11-23
 ### Bash中的set builtin
-1. 一般在新建脚本时候，都会使用set设置shell配置，比如 `set -eEuo pipefail`，其中的 `-e` 用于设置发生错误时立即退出脚本。如果有`trap 'cmd' ERR`，会先执行`cmd`再退出脚本。如果没有`-e`，`cmd`执行后会继续执行后面脚本，除非`cmd`里面有退出脚本的命令，比如`exit`。但是有些命令返回不为0也并不意味着发生错误，因此需要绕过这类，主要有以下几种方式：
-1) 不使用全局set -e，使用trap方式在handler中控制
+1. 一般在新建脚本时候, 都会使用set设置shell配置, 比如 `set -eEuo pipefail`, 其中的 `-e` 用于设置发生错误时立即退出脚本。如果有`trap 'cmd' ERR`, 会先执行`cmd`再退出脚本。如果没有`-e`, `cmd`执行后会继续执行后面脚本, 除非`cmd`里面有退出脚本的命令, 比如`exit`。但是有些命令返回不为0也并不意味着发生错误, 因此需要绕过这类, 主要有以下几种方式：
+1) 不使用全局set -e, 使用trap方式在handler中控制
 2) 局部使用set +e
-3) false || echo "failed"，这个不会触发
+3) false || echo "failed", 这个不会触发
 
-2. 默认情况下shell functions, command substitutions, and commands executed in a subshell environment这些环境不会继承ERR trap，使用 set -E开放继承。
+2. 默认情况下shell functions, command substitutions, and commands executed in a subshell environment这些环境不会继承ERR trap, 使用 set -E开放继承。
 
 ```bash
 #!/usr/bin/env bash
@@ -77,26 +165,26 @@ echo "after false"
 
 ## 2023-11-21
 ### Bash中 `[]` 和 `[[]]` 的区别
-根本区别是`[]`是命令，路径位于`/usr/bin/[`，而`[[]]`只是Bash中的关键字, 这就决定了两者执行的不同。
+根本区别是`[]`是命令, 路径位于`/usr/bin/[`, 而`[[]]`只是Bash中的关键字, 这就决定了两者执行的不同。
 ```bash
 type -a [ # [ is a shell builtin\n[ is /usr/bin/[ ...
 type -a [[ # [[ is a shell keyword
 ```
-`[ expression ]`在执行的时候，中间的expression会被解释为函数参数，因此会被一次性执行各种expansion；但是`[[ expression ]]`是**keyword**，中间的expression可以根据Bash自己的规则解释，比如如果expression有多个子expression，然后执行且、或等操作，就会先执行第一个，使用[lazy evaluation](https://lists.gnu.org/archive/html/help-bash/2014-06/msg00013.html)。
+`[ expression ]`在执行的时候, 中间的expression会被解释为函数参数, 因此会被一次性执行各种expansion；但是`[[ expression ]]`是**keyword**, 中间的expression可以根据Bash自己的规则解释, 比如如果expression有多个子expression, 然后执行且、或等操作, 就会先执行第一个, 使用[lazy evaluation](https://lists.gnu.org/archive/html/help-bash/2014-06/msg00013.html)。
 ```bash
-# 如果$3为空，[ $# -gt 3 -a = "-ks" ] 式子不知道怎么解析
+# 如果$3为空, [ $# -gt 3 -a = "-ks" ] 式子不知道怎么解析
 [ $# -gt 3 -a $3 = "-ks" ]
 ```
-相信这也是`[]`里面不能使用`&&`的原因，这样无法解析语句了，比如
+相信这也是`[]`里面不能使用`&&`的原因, 这样无法解析语句了, 比如
 ```bash
-[ -z $SHELL && -n $PWD ] # 报错，找不到]
+[ -z $SHELL && -n $PWD ] # 报错, 找不到]
 ```
 
 ### Linux中目录切换技巧
-使用pushd和popd，临时切换目录执行后回到当前目录
+使用pushd和popd, 临时切换目录执行后回到当前目录
 
 ### --no-clobber
-Linux文档中经常出现`--no-clobber`，意思是是否要覆盖已存在文件
+Linux文档中经常出现`--no-clobber`, 意思是是否要覆盖已存在文件
 
 ### Node流跟文件联系
 ```js
@@ -116,7 +204,7 @@ vi -E -s -u "$HOME/.vimrc" +PlugUpdate +qall
 
 ## 2023-11-08
 ### Bash printf
-`%q`，用于生成可以在bash命令中使用的字符串，比如有些options为`key = value`，这样去使用肯定有问题，所以可以格式化下
+`%q`, 用于生成可以在bash命令中使用的字符串, 比如有些options为`key = value`, 这样去使用肯定有问题, 所以可以格式化下
 ```bash
 printf "%q " "a = b" # a\ =\ b
 ```
@@ -130,12 +218,12 @@ type -a ls
 ```
 
 ### [Postgres docker shell file](https://github.com/docker-library/postgres/blob/master/16/bookworm/docker-entrypoint.sh)
-1. indirect expansion, `${!var}` 感叹号开头的变量，要不就是数组的key，要不就要考虑indirect expansion
+1. indirect expansion, `${!var}` 感叹号开头的变量, 要不就是数组的key, 要不就要考虑indirect expansion
 ```bash
-# 比如脚本中file_env中，使用本地变量indirect expansion获取外边环境变量的值
+# 比如脚本中file_env中, 使用本地变量indirect expansion获取外边环境变量的值
 var=hello var1=var bash -c 'echo ${!var1}' # hello
 ```
-2. 函数内部引用外部变量，填补了不能返回值的问题
+2. 函数内部引用外部变量, 填补了不能返回值的问题
 ```bash
 myvar="hello world"
 function ref_test() {
@@ -149,7 +237,7 @@ ref_test
 echo "$myvar"
 ```
 3. FUNCNAME, BASH_SOURCE  
-`FUNCNAME`, 数组，默认情况函数调用名称，最下面是`main`，如果使用source执行文件，则为`source`，脚本中判断是否使用source执行函数`is_source`使用此环境变量
+`FUNCNAME`, 数组, 默认情况函数调用名称, 最下面是`main`, 如果使用source执行文件, 则为`source`, 脚本中判断是否使用source执行函数`is_source`使用此环境变量
 ```bash
 function _is_source() {
      [ "${#FUNCNAME[@]}" -ge 2 ] \
@@ -157,7 +245,7 @@ function _is_source() {
           && [ "${FUNCNAME[1]}" == 'source' ]
 }
 ```
-`BASH_SOURCE`，比如嵌套执行文件中，想正确获取$0, 可以使用此变量，调用栈的$0，可以试想下，`./hello.sh`在新进程中执行
+`BASH_SOURCE`, 比如嵌套执行文件中, 想正确获取$0, 可以使用此变量, 调用栈的$0, 可以试想下, `./hello.sh`在新进程中执行
 ```bash
 # hello.sh
 echo "BASH_SOURCE: $BASH_SOURCE"
@@ -174,7 +262,7 @@ source hello.sh
 ```
 
 ### Linux setid bit, setgroup bit, sticky bit
-可以使用octal表示，比如setid bit为4***，比如搜索setid bit设置的文件:
+可以使用octal表示, 比如setid bit为4***, 比如搜索setid bit设置的文件:
 ```bash
 find /bin/* -perm /4000 -ls
 ```
@@ -199,14 +287,14 @@ function _trap_DEBUG()
 trap '_trap_DEBUG' DEBUG
 ```
 2. `set -x` 或者 `bash -x`
-3. 类似于 `set -x` 方式，将信息输出到文件，主要使用两个builtin变量，`$PS4`和`$BASH_XTARCEFD`
+3. 类似于 `set -x` 方式, 将信息输出到文件, 主要使用两个builtin变量, `$PS4`和`$BASH_XTARCEFD`
 ```bash
 exec 5<> debug.log
 PS4='$LINENO: '
 BASH_XTRACEFD='5'
 bash -x test.sh
 ```
-4. 检查bash文件是否语法正确，不执行bash文件, `bash -n bash_script`
+4. 检查bash文件是否语法正确, 不执行bash文件, `bash -n bash_script`
 
 ### Bash network
 Linux中`/dev/[tcp|upd]/host/port`会自动建立网络连接
@@ -234,26 +322,26 @@ kill ${COPROC_PID} # coproc会自动生成变量NAME_PID
 ## 2023-10-31
 ### 单词
 `disposable product` 一次性产品<br>
-`rationale` 基本原理(为什么要这么整)，很多manpage中有这么一段<br>
-`displacement` 移动，位移，排水量<br>
+`rationale` 基本原理(为什么要这么整), 很多manpage中有这么一段<br>
+`displacement` 移动, 位移, 排水量<br>
 
 ### [Signal](https://man7.org/linux/man-pages/man7/signal.7.html)
-1. Signal dispositions, each signal has a current *disposition*, which determines how the process behaves when it is delivered the signal. for example, "Term", "Ign", "Core" etc，即信号的默认行为方式。可以通过signal或者sigaction(推荐方式，从portable方面考虑)更改disposition(fork copy signal disposition after execve(), ignore keeped and other set default disposition)。
-2. A child created via fork(2) inherits a copy of its parent's signal dispositions. During an execve(2), the dispositions of handled signals are reset to the default; the dispositions of ignored signals are left unchanged. 这句话注意fork后，exceve前时间signal状态，**另外就是所有忽略的signal直接继承，不会更改为默认**
+1. Signal dispositions, each signal has a current *disposition*, which determines how the process behaves when it is delivered the signal. for example, "Term", "Ign", "Core" etc, 即信号的默认行为方式。可以通过signal或者sigaction(推荐方式, 从portable方面考虑)更改disposition(fork copy signal disposition after execve(), ignore keeped and other set default disposition)。
+2. A child created via fork(2) inherits a copy of its parent's signal dispositions. During an execve(2), the dispositions of handled signals are reset to the default; the dispositions of ignored signals are left unchanged. 这句话注意fork后, exceve前时间signal状态, **另外就是所有忽略的signal直接继承, 不会更改为默认**
 3. **SIGKILL(9)**和**SIGSTOP(19)**不能被caught, ignore, block
-4. **SIGINT, SIGQUIT**对后台进程无效，because **interrupt from keyboard**
+4. **SIGINT, SIGQUIT**对后台进程无效, because **interrupt from keyboard**
 5. [查看进程的所有singal的disposition](https://unix.stackexchange.com/questions/85364/how-can-i-check-what-signals-a-process-is-listening-to)
-6. *SIGCHLD* 每当子进程状态发生变化时，kernel会给其父进程发送SIGCHLD消息，包括子进程stopped，continued，terminated
-7. *SIGPIPE* 用于管道或者socket，写入一个不能读或者读一个不能写入的管道，一端socket已经意外关闭，还继续读写等情况触发
+6. *SIGCHLD* 每当子进程状态发生变化时, kernel会给其父进程发送SIGCHLD消息, 包括子进程stopped, continued, terminated
+7. *SIGPIPE* 用于管道或者socket, 写入一个不能读或者读一个不能写入的管道, 一端socket已经意外关闭, 还继续读写等情况触发
 8. *SIGALARM* 使用`alarm(seconds)`触发
 ```bash
 cat /proc/pid/status | grep -E 'Sig.+'
 ```
 6. kill, killall
 ```bash
-kill -0 pid # 测试pid是否存在，check existence and permission
+kill -0 pid # 测试pid是否存在, check existence and permission
 kill -l # 1) SIGHUB 2) SIGINT ...
-kill -9 pid # send 9(sigkill) to operation system，不给程序机会捕获机会
+kill -9 pid # send 9(sigkill) to operation system, 不给程序机会捕获机会
 kill -2 pid # send SIGINT(Ctrl+C) to 程序
 kill %1 # terminate a background job
 kill pid # terminate a program using the default SIGTERM(terminate) signal
@@ -270,7 +358,7 @@ trap "" INT # ignore
 trap "echo INT signal caught" INT # caught and execute custom command
 ```
 - `kill -2 pid` VS  `CTRL+C`
-CTRL+C会发送SIGINT给所有的*foreground process group*(有terminal的process group)，而前者仅仅发送给相应的pid
+CTRL+C会发送SIGINT给所有的*foreground process group*(有terminal的process group), 而前者仅仅发送给相应的pid
 
 8. 程序流程套路
 fork,execve,wait, waitpid
@@ -278,22 +366,22 @@ sigprocmask, sigaction, sigsuspend
 详细参考[例子](./signal.c)
 
 ### fork and execve
-exec+e覆盖env，使用传入的环境变量，使用getenv，putenv, setenv and unsetenv等方法修改
+exec+e覆盖env, 使用传入的环境变量, 使用getenv, putenv, setenv and unsetenv等方法修改
 execvep _GNU_SOURCE
 
 ## 2023-10-30
 ### [Bash启动文件(bash startup files)](https://cjting.me/2020/08/16/shell-init-type/)
-1. login+interactive/non-interactive, 比如ssh登录等，也可以设置terminal为登录shell(一般terminal设置中有相应的项去check)
-- `/etc/profile`，一般这个脚本里面会执行`/etc/profile.d/*`里面多有脚本
-- *`~/.bash_profile`, `~/.bash_login`, `~/.profile`* 按这个顺寻寻找文件，只执行最先找到的可执行文件
+1. login+interactive/non-interactive, 比如ssh登录等, 也可以设置terminal为登录shell(一般terminal设置中有相应的项去check)
+- `/etc/profile`, 一般这个脚本里面会执行`/etc/profile.d/*`里面多有脚本
+- *`~/.bash_profile`, `~/.bash_login`, `~/.profile`* 按这个顺寻寻找文件, 只执行最先找到的可执行文件
 - 退出时执行`~/.bash_logout`
-2. non-login+interactive, 比如使用UI界面中使用terminal，或者在terminal中使用执行bash命令
+2. non-login+interactive, 比如使用UI界面中使用terminal, 或者在terminal中使用执行bash命令
 - `~/.bashrc`
-3. non-login+non-interactive, 比如使用bash命令执行脚本，比如`bash test.txt`
+3. non-login+non-interactive, 比如使用bash命令执行脚本, 比如`bash test.txt`
 - 执行`$BASH_ENV`指向的文件
 
 **CAVEATS**
-1. bash命令可以使用`-l`, `-i`强迫使用login或者interactive方式执行，另外还有`--norc`，`--noprofile`, `--init-file`/`--rc-file`(Execute commands from filename (**instead of ~/.bashrc**) in an **interactive shell**.)
+1. bash命令可以使用`-l`, `-i`强迫使用login或者interactive方式执行, 另外还有`--norc`, `--noprofile`, `--init-file`/`--rc-file`(Execute commands from filename (**instead of ~/.bashrc**) in an **interactive shell**.)
 2. 判断login或者interactive shell
 ```bash
 # 是否为login shell
@@ -306,7 +394,7 @@ echo $PS1 # 不为空
 ```
 
 ### xdg-open
-根据不同参数使用不同默认打开方式打开，`open`命令指向她
+根据不同参数使用不同默认打开方式打开, `open`命令指向她
 
 ### realpath, readlink, dirname, basename
 ```bash
@@ -320,11 +408,11 @@ realpath test.txt | xargs basename -s .txt # test 去掉后缀
 
 ## 2023-10-25
 ### strace使用
-strace trace system calls and signals，[man page](https://man7.org/linux/man-pages/man1/strace.1.html)更有趣<br>
+strace trace system calls and signals, [man page](https://man7.org/linux/man-pages/man1/strace.1.html)更有趣<br>
 ```strace -v -qq -f -e signal=none -e execve,file -p 12345```
 ```
 -v 显示所有参数
--qq 隐藏部分事件，详细可以使用--quiet=attach,..设置
+-qq 隐藏部分事件, 详细可以使用--quiet=attach,..设置
 -f 包含子进程
 -e 设置过滤条件
 ```
@@ -336,27 +424,27 @@ lsof -a -P -n -R -p $$ -u 0,1,2,3 -i 4tcp@localhost:1234
 lsof -c /cr[ao]/ # 支持正则表达式
 lsof /run # 查看哪些进程使用/run文件夹
 
--P 不做端口转换port names，速度会快点
--n inhibits the conversion of network numbers to host names for network files，速度会快点
--a 所有条件使用and，放的位置没有关系
+-P 不做端口转换port names, 速度会快点
+-n inhibits the conversion of network numbers to host names for network files, 速度会快点
+-a 所有条件使用and, 放的位置没有关系
 -p 指定process
 -u 指定file descriptor
--i 指定网络相关，格式为 -i [46][tcp|udp][@hostname|hostaddr][:service|port]
+-i 指定网络相关, 格式为 -i [46][tcp|udp][@hostname|hostaddr][:service|port]
 -c commands
 -R 显示PPID
 -U unix socket
--t [file] 返回关联file的process ids，只输出pid
+-t [file] 返回关联file的process ids, 只输出pid
 ```
 
 ### fcntl使用, [manipulate file descriptor](https://man7.org/linux/man-pages/man2/fcntl.2.html)
-获取文件描述符的fd flag(Process级别信息)，就一个close_on_exec，对应参数F_GETFD, FD_CLOEXEC
+获取文件描述符的fd flag(Process级别信息), 就一个close_on_exec, 对应参数F_GETFD, FD_CLOEXEC
 ```
 flags = fcntl(fd, F_GETFD)
 flags & FD_CLOEXEC
 flags |= FD_CLOEXEC
 fcntl(fd, F_SETFD, flags)
 ```
-获取OFD(Open File Descriptor)中的文件状态，offset等，使用F_GETFL，
+获取OFD(Open File Descriptor)中的文件状态, offset等, 使用F_GETFL, 
 ```
 flags = fcntl(fd, F_GETFL)
 access_mode = flags & O_ACCMODE
@@ -366,18 +454,18 @@ O_RDWR    10
 O_ACCMODE 11
 readable: access_mode == O_RDONLY || access_mode == O_RDWR
 ```
-还可以设置nonblocking，dup, file lock等操作
+还可以设置nonblocking, dup, file lock等操作
 
 ### [flock](https://man7.org/linux/man-pages/man1/flock.1.html), manage locks from shell scripts
 1. advisory locks vs mandatory locks
-- advisory locks开发者自己去操作锁，如果不操作锁，也可以去读写文档，但是会出现信息错乱问题。
-- mandatory locks是操作系统级别的锁，读写都会检查是否有锁，性能上肯定有折扣
+- advisory locks开发者自己去操作锁, 如果不操作锁, 也可以去读写文档, 但是会出现信息错乱问题。
+- mandatory locks是操作系统级别的锁, 读写都会检查是否有锁, 性能上肯定有折扣
 
 2. lslocks 查看有哪些锁
 
 ### 重温链接
-- 硬链接 同一个inode点，inode信息的引用+1，互相不影响
-- 软连接 不同的inode节点，内容指向原始路径
+- 硬链接 同一个inode点, inode信息的引用+1, 互相不影响
+- 软连接 不同的inode节点, 内容指向原始路径
 ```bash
 ln -s test.txt test.ln
 ln test.txt test.hard
@@ -409,7 +497,7 @@ PKG_CONFIG_PATH=$HOME/curl/lib/pkgconfig pkg-config --libs --cflags libcurl
 ```
 ### HTML
 1. url-encoding 也叫 percent-encoding
-2. form tag默认的enctype为application/x-www-form-urlencoded(curl -d)，也可以改为[enctype=multipart/form-data(curl -F)](https://www.w3.org/Protocols/rfc1341/7_2_Multipart.html)，application/x-www-form-urlcoded用于简单的key-value传递，使用 `&` 连接，比如 `name=james&age=39`；如果有二进制内容需要传递，可以使用`multipart/form-data`, 报文如下格式:
+2. form tag默认的enctype为application/x-www-form-urlencoded(curl -d), 也可以改为[enctype=multipart/form-data(curl -F)](https://www.w3.org/Protocols/rfc1341/7_2_Multipart.html), application/x-www-form-urlcoded用于简单的key-value传递, 使用 `&` 连接, 比如 `name=james&age=39`；如果有二进制内容需要传递, 可以使用`multipart/form-data`, 报文如下格式:
 ```
 Content-Type: multipart/form-data; boundary=abc
 
@@ -423,7 +511,7 @@ Content-Disposition: form-data; name="age"
 39
 --abc--
 ```
-**上面内容开始需要在boundary前面加 `--`，结尾时需要在头尾均加上 `--`**
+**上面内容开始需要在boundary前面加 `--`, 结尾时需要在头尾均加上 `--`**
 
 ### Curl command line use
 ```shell
@@ -433,14 +521,14 @@ curl -I http://example.com
 curl -v -I http://example.com
 # show request conent data
 curl --trace curl.log -d "name=john" http://example.com
-# -d 传输数据默认使用Content-Type: application/x-www-form-urlencoded 如果需要修改type，可以添加相应的头部，比如-H "application/json"
+# -d 传输数据默认使用Content-Type: application/x-www-form-urlencoded 如果需要修改type, 可以添加相应的头部, 比如-H "application/json"
 curl -d "name=john" -H "application/json" http://example.com 
-# -c file 存储cookie到file，-b [data/file] 读取cookie
+# -c file 存储cookie到file, -b [data/file] 读取cookie
 curl -c cookies -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" https://www.baidu.com
 curl -c cookies -b cookies http://www.baidu.com
 ```
 ## 2023-10-12
-### 查看标准C库头文件的man page，安装manpage-posix-dev
+### 查看标准C库头文件的man page, 安装manpage-posix-dev
 ```shell
 sudo apt install manpage-posix-dev
 man sys_time.h # sys/time.h
@@ -466,7 +554,7 @@ struct tm {
      int tm_year; // years since 1900
      int tm_wday; //day of week[0-6] sunday=0
      int tm_yday; // day of year [0-365]
-     int tm_iddst; // daylight savings flags, 据说linux平台一直为0(没有)(-1不知道，1使用)
+     int tm_iddst; // daylight savings flags, 据说linux平台一直为0(没有)(-1不知道, 1使用)
      long int tm_gmtoff; // 距离utc的秒数
 };
 char *asctime(const struct tm *tm); // Thu Oct 12 14:51:17 2023
@@ -480,7 +568,7 @@ time_t now = time(NULL);
 local = mktime(localtime(now));
 std = mktime(gmtime(now));
 diff = std - local;  // offset seconds
-// 这个有个前提，如果使用localtime_r或者gmtime_r需要手动调用tzset()要设置下, 无论什么都可以先调用下
+// 这个有个前提, 如果使用localtime_r或者gmtime_r需要手动调用tzset()要设置下, 无论什么都可以先调用下
 // 2. 还可以通过标准库中全局变量获取, [man tzset](https://man7.org/linux/man-pages/man3/tzset.3.html)
 extern long timezone;
 extern char *tzname[2];
@@ -492,7 +580,7 @@ printf("The daylight is '%d'\n", daylight);
 ```
 
 ### [Datetime format](https://man7.org/linux/man-pages/man3/strftime.3.html)
-1. 文档中提及的[`broken-down time`](https://www.gnu.org/software/libc/manual/html_node/Broken_002ddown-Time.html), 表示将年月日等信息单独出来的二进制，人类友好可阅读，使用 `struct tm` 表示; 机器使用[time_t](https://www.gnu.org/software/libc/manual/html_node/Time-Types.html)表示，表示距离1970-1-1 00:00:00 UTC的秒数
+1. 文档中提及的[`broken-down time`](https://www.gnu.org/software/libc/manual/html_node/Broken_002ddown-Time.html), 表示将年月日等信息单独出来的二进制, 人类友好可阅读, 使用 `struct tm` 表示; 机器使用[time_t](https://www.gnu.org/software/libc/manual/html_node/Time-Types.html)表示, 表示距离1970-1-1 00:00:00 UTC的秒数
 2. ctime操作(transform date and time to broken-down time or ASCII)可以查看[文档](https://man7.org/linux/man-pages/man3/ctime.3.html)
 ```C
 char *asctime(const struct tm *tm);
@@ -507,7 +595,7 @@ size_t strftime(char s[restrict .max], size_t max,
 char *strptime(const char *restrict s, const char *restrict format,
                struct tm *restrict tm);
 ```
-其中format转义字符大部分其他语言都遵守这个规则，比如python，使用python调试这些更方便
+其中format转义字符大部分其他语言都遵守这个规则, 比如python, 使用python调试这些更方便
 ```python
 from datetime import datetime
 now = datetime.now()
@@ -524,25 +612,25 @@ locale # 查看所有locale categores和LC_ALL, LANG, LANGUAGE
 locale -k LC_NAME
 locale -k name_fmt
 ```
-1. LC_ALL一般不设置，用于在命令行中临时设置控制程序行为，比如用于使用原生C类型排序时，`LC_ALL=C sort file.txt`
-2. env环境变量中都是有值的键值对，LC_\*, LANGUAGE, LANG如果没有被设置，env没有相应的变量；尽管使用`locale`命令都会显示出来，特别是LC_*(LC_ALL除外)，有个规则
-如果LC_\*不存在，则使用LANG的值填充，这就是为什么命令`locale`结果中LC_\*有的值没有对应环境变量，[如果LANG也没有值，则值为"POSIX"](https://unix.stackexchange.com/questions/449318/how-does-the-locale-program-work) and [here](https://unix.stackexchange.com/questions/449318/how-does-the-locale-program-work)
+1. LC_ALL一般不设置, 用于在命令行中临时设置控制程序行为, 比如用于使用原生C类型排序时, `LC_ALL=C sort file.txt`
+2. env环境变量中都是有值的键值对, LC_\*, LANGUAGE, LANG如果没有被设置, env没有相应的变量；尽管使用`locale`命令都会显示出来, 特别是LC_*(LC_ALL除外), 有个规则
+如果LC_\*不存在, 则使用LANG的值填充, 这就是为什么命令`locale`结果中LC_\*有的值没有对应环境变量, [如果LANG也没有值, 则值为"POSIX"](https://unix.stackexchange.com/questions/449318/how-does-the-locale-program-work) and [here](https://unix.stackexchange.com/questions/449318/how-does-the-locale-program-work)
 ```shell
 LANG= locale | grep 'POSIX'
 ```
-3. **如果env中不存在值，那就被设置为局部变量，比如：假设LC_COLLATE不存在env中，那就无法被子shell继承，并且无法对使用该环境变量的命令产生影响**
+3. **如果env中不存在值, 那就被设置为局部变量, 比如：假设LC_COLLATE不存在env中, 那就无法被子shell继承, 并且无法对使用该环境变量的命令产生影响**
 ```shell
 env | grep LC_COLLATE # 空 LC_COLLATE不存在
 locale | grep LC_COLLCATE # LC_COLLCATE="en_US.UTF-8" 因为LANG="en_US.UTF-8" 
-LC_COLLATE="zh_CN.UTF-8" ; locale | grep LC_COLLATE # LC_COLLATE="en_US.UTF-8", 因为LC_COLLATE不存在env中，设置只是局部变量，无法影响全局
+LC_COLLATE="zh_CN.UTF-8" ; locale | grep LC_COLLATE # LC_COLLATE="en_US.UTF-8", 因为LC_COLLATE不存在env中, 设置只是局部变量, 无法影响全局
 env | grep LC_COLLATE # 空 LC_COLLATE不存在
 
 env | grep LC_NAME # LC_NAME=en_US.UTF-8
 locale | grep LC_NAME # LC_NAME="en_US.UTF-8"
-LC_NAME="zh_CN.UTF-8" ; locale | grep LC_NAME # LC_NAME="zh_CN.UTF-8", 因为LC_NAME存在env中，设置改变了当前shell全局
+LC_NAME="zh_CN.UTF-8" ; locale | grep LC_NAME # LC_NAME="zh_CN.UTF-8", 因为LC_NAME存在env中, 设置改变了当前shell全局
 env | grep LC_NAME # LC_NAME="zh_CN.UTF-8" 当前shell全局变量已经在上一步改变了
 ```
-4. [类型C或者POSIX会使用ascii char set, 都转化成127字节进行操作，机器可读](https://askubuntu.com/questions/801933/what-does-c-in-lc-all-c-mean) and [here](https://unix.stackexchange.com/questions/87745/what-does-lc-all-c-do)，还有[sort manual中描述](https://man7.org/linux/man-pages/man1/sort.1.html)
+4. [类型C或者POSIX会使用ascii char set, 都转化成127字节进行操作, 机器可读](https://askubuntu.com/questions/801933/what-does-c-in-lc-all-c-mean) and [here](https://unix.stackexchange.com/questions/87745/what-does-lc-all-c-do), 还有[sort manual中描述](https://man7.org/linux/man-pages/man1/sort.1.html)
 ```shell
 *** WARNING *** The locale specified by the environment affects sort order. Set LC_ALL=C to get the traditional sort order that uses native byte values.
 ```
@@ -550,20 +638,20 @@ env | grep LC_NAME # LC_NAME="zh_CN.UTF-8" 当前shell全局变量已经在上�
 ```shell
 A="hello" echo $A # 空
 A="hello"; echo $A # hello
-# 原因是第一行中因为bash运行前先展开变量，使用 ; 表示语句分隔符
-A="hello" bash -c 'echo $A' # hello 使用单引号，不会在运行前展开变量, 并且A会临时加入到env环境变量中，当前语句执行结束会一处，这个时候bash -c新开进程会继承A环境变量，只要执行不展开就ok
+# 原因是第一行中因为bash运行前先展开变量, 使用 ; 表示语句分隔符
+A="hello" bash -c 'echo $A' # hello 使用单引号, 不会在运行前展开变量, 并且A会临时加入到env环境变量中, 当前语句执行结束会一处, 这个时候bash -c新开进程会继承A环境变量, 只要执行不展开就ok
 A="hello" bash -c "echo $A" # 空
-A="hello"; bash -c 'echo $A' # 空, bash -c会新建进程执行，这个时候不会继承A变量, 除非A是全局环境变量
+A="hello"; bash -c 'echo $A' # 空, bash -c会新建进程执行, 这个时候不会继承A变量, 除非A是全局环境变量
 
 # 假设当前环境变量LC_NAME=zh_CN.UTF-8
-LC_NAME=en_US.UTF-8 env | grep LC_NAME # LC_NAME=en_US.UTF-8 设置LC_NAME到当前的环境变量，不对其他任何环境产生影响
+LC_NAME=en_US.UTF-8 env | grep LC_NAME # LC_NAME=en_US.UTF-8 设置LC_NAME到当前的环境变量, 不对其他任何环境产生影响
 env | grep LC_NAME # LC_NAME=zh_CN.UTF-8
 LC_NAME=en_US.UTF-8; env | grep LC_NAME # LC_NAME=en_US.UTF-8 设置当前环境变量LC_NAME, 
 env | grep LC_NAME # LC_NAME=en_US.UTF-8
 LC_NAME=zh_CN.UTF-8 # 还原
-LC_NAME=C && locale | grep 'LC_NAME' # LC_NAME=en_US.UTF-8 效果跟上面一样，但是意义不同，首先修改环境变量，成功后在执行后面语句
+LC_NAME=C && locale | grep 'LC_NAME' # LC_NAME=en_US.UTF-8 效果跟上面一样, 但是意义不同, 首先修改环境变量, 成功后在执行后面语句
 ```
-1. **bash -c会新建进程处理，pipe符号 `|` 也有类似流程**
+1. **bash -c会新建进程处理, pipe符号 `|` 也有类似流程**
 2. [空格和`;`在定义环境变量中的区别](https://unix.stackexchange.com/questions/36745/when-to-use-a-semi-colon-between-environment-variables-and-a-command)
 
 ### 有趣的sort
@@ -575,9 +663,9 @@ sort <<< $'a\nb\nA\nB\n'
 # 结果：a/nA/n/b/nB/n
 echo -e 'a\nb\nA\nB\n' | LC_COLLATE=en_US.UTF-8 sort
 ```
-1. sort默认根据LC_COLLATE比较, 比如en_US，根据字符比较，看起来像不区分大小写字符比较，但是**C会转化为字节后比较**
-2. 其中shell中`<<<`代表[here string](https://www.gnu.org/software/bash/manual/bash.html#Here-Strings)，`<<`表示here document<br>
-3. [\$'\x31' vs \$"\x31"](https://unix.stackexchange.com/questions/48106/what-does-it-mean-to-have-a-dollarsign-prefixed-string-in-a-script) \$'str'转义字符串，类似echo -e；$"str"用于根据locale翻译str
+1. sort默认根据LC_COLLATE比较, 比如en_US, 根据字符比较, 看起来像不区分大小写字符比较, 但是**C会转化为字节后比较**
+2. 其中shell中`<<<`代表[here string](https://www.gnu.org/software/bash/manual/bash.html#Here-Strings), `<<`表示here document<br>
+3. [\$'\x31' vs \$"\x31"](https://unix.stackexchange.com/questions/48106/what-does-it-mean-to-have-a-dollarsign-prefixed-string-in-a-script) \$'str'转义字符串, 类似echo -e；$"str"用于根据locale翻译str
 
 ## 2023-10-09
 ### [BRE and ERE](https://www.gnu.org/software/sed/manual/sed.html#BRE-vs-ERE)
@@ -593,16 +681,16 @@ With basic (BRE) syntax, these characters do not have special meaning unless pre
 |One or more ‘a’ characters followed by ‘b’ (plus sign as special meta-character)| ```$ echo aab > foo```<br>```$ sed -n '/a\+b/p' foo aab```|```$ echo aab > foo```<br>```$ sed -E -n '/a+b/p' foo aab```|
 
 ### man 1 printf
-`printf "%s\n" abode bad bed bit bid byte body` 会将后面的arguments执行7次，得到结果: `abode\nbad\nbed\nbit\nbid\nbyte\nbody\n`
+`printf "%s\n" abode bad bed bit bid byte body` 会将后面的arguments执行7次, 得到结果: `abode\nbad\nbed\nbit\nbid\nbyte\nbody\n`
 
 ### [awk redirect](https://www.gnu.org/software/gawk/manual/gawk.html#Redirection)
 `netstat -t | awk 'NR != 1 && NR != 2 { print > $6 }'`<br>
-这里的 **>** 与shell种的redirect行为不同，这里是append，详见上面链接文档
+这里的 **>** 与shell种的redirect行为不同, 这里是append, 详见上面链接文档
 ### sed有趣的指令
 - [pattern space and hold space](https://www.gnu.org/software/sed/manual/sed.html#advanced-sed)
 - n 跳过当前行, 类似awk中的`next`命令
 - `N` `pattern_space += '\n' + next_line`
-- `l n` 打印pattern space，可以打印不可见字符, n表示多少字符后换行
+- `l n` 打印pattern space, 可以打印不可见字符, n表示多少字符后换行
 ```shell
 # \u00b7 middle dot
 # basic regular expression ? + () {} | 需要转义
@@ -612,12 +700,12 @@ With basic (BRE) syntax, these characters do not have special meaning unless pre
 
 ## 2023-09-29
 ### QUIC加解密用到的cid
-1. **计算密钥时要用到的cid，如果没有retry packet的话，使用client发送initial packet中的destination cid。如果发生retry，则在下次client initial packet中使用这个scid作为dcid，并且server和client都以此作为加解密使用的cid。** retry packet中的source cid必须是自己选择的，不能与前面的client initial packet中的destination cid相同，这个跟version negotiation不同
+1. **计算密钥时要用到的cid, 如果没有retry packet的话, 使用client发送initial packet中的destination cid。如果发生retry, 则在下次client initial packet中使用这个scid作为dcid, 并且server和client都以此作为加解密使用的cid。** retry packet中的source cid必须是自己选择的, 不能与前面的client initial packet中的destination cid相同, 这个跟version negotiation不同
 2. [version negotiation destination cid和source cid必须跟client initial packet中的source cid和destination cid保持一致](https://github.com/alibaba/xquic/blob/main/docs/translation/rfc9000-transport-zh.md#1721-%E7%89%88%E6%9C%AC%E5%8D%8F%E5%95%86%E5%8C%85version-negotiation-packet)
 
 ## 2023-09-27
 ### [TLS1.3变长字段编码](https://datatracker.ietf.org/doc/html/rfc8446#section-3.4)
-在使用HKDF计算时，其中的label需要按照[文档](https://datatracker.ietf.org/doc/html/rfc8446#section-7.1)编码，很容易错误是对于**变长字段需要添加长度前缀**，这个在文档的3.4章有提及，太隐晦○|￣|_
+在使用HKDF计算时, 其中的label需要按照[文档](https://datatracker.ietf.org/doc/html/rfc8446#section-7.1)编码, 很容易错误是对于**变长字段需要添加长度前缀**, 这个在文档的3.4章有提及, 太隐晦○|￣|_
 ```
 HKDF-Expand-Label(Secret, Label, Context, Length) =
             HKDF-Expand(Secret, HkdfLabel, Length)
@@ -648,16 +736,16 @@ hkdf_label = pack(">H", length) \
 print(hkdf_label)
 ```
 ### octet VS octal
-- octet: 就是一个字节的意思，因为byte在某些场景不一定指定8位一组，有些场景引起混淆的地方就使用octet更严谨，比如[TLS1.3 RFC](https://datatracker.ietf.org/doc/html/rfc8446)
+- octet: 就是一个字节的意思, 因为byte在某些场景不一定指定8位一组, 有些场景引起混淆的地方就使用octet更严谨, 比如[TLS1.3 RFC](https://datatracker.ietf.org/doc/html/rfc8446)
 - octal: 代表八进制
 ### hexdump, xxd
 1. KB and K(KiB)  
-hexdump可以使用K或者KiB代表1024字节，KB代表1000字节
+hexdump可以使用K或者KiB代表1024字节, KB代表1000字节
 2. Format and Color in HEXDUMP
 ```shell
 hexdump -e '"%08_Ax_L[cyan]\n"' -e '"%08_ax_L[cyan]  " 8/2 "%04x_L[green:0x6f72@0-1,!red:0x6f72@0-1] " "  |"' -e '16/1 "%_p" "|" "\n"' -n 64 /etc/passwd
 ```
-3. xxd和hexdump分场景使用，hexdump支持定制，功能更丰富，但是简单场景xxd似乎更适合点 :)
+3. xxd和hexdump分场景使用, hexdump支持定制, 功能更丰富, 但是简单场景xxd似乎更适合点 :)
 ```shell
 echo -en "tls13 $label" | hexdump -v -e '/1 %02x'
 echo -en "tls13 $label" | xxd -p
@@ -672,7 +760,7 @@ printf "%-08.3x" 7 -> 007_____
 
 flags: 0 表示不足长度8使用0填充
 width: 8 表示最长长度为8
-precision: 3 使用x时，precision表示最短长度
+precision: 3 使用x时, precision表示最短长度
 specifier: x 表示使用16进制表示
 ```
 ## 2023-09-14
@@ -690,13 +778,13 @@ else:
 server = await loop.create_server(Socks5Protocol, sock=s, ssl=ssl_ctx, reuse_address=True, reuse_port=True)
 ```
 2. CLOSE_WAIT状态连接
-```sudo lsof -i:1080```, 原因时被动关闭方(server)，发送完fin，应用程序没有正确检测socket关闭状态导致, 需要合适的时候关闭socket
-3. 解析域名时，需要判断下客户端是否是域名，还是IPv4/IPv6，chrome中的某个插件直接将IPv4/6地址当作域名发送
-4. wireshark会根据端口显示协议，比如使用1080端口，即使不是Socks5协议，也会显示该Socks协议
+```sudo lsof -i:1080```, 原因时被动关闭方(server), 发送完fin, 应用程序没有正确检测socket关闭状态导致, 需要合适的时候关闭socket
+3. 解析域名时, 需要判断下客户端是否是域名, 还是IPv4/IPv6, chrome中的某个插件直接将IPv4/6地址当作域名发送
+4. wireshark会根据端口显示协议, 比如使用1080端口, 即使不是Socks5协议, 也会显示该Socks协议
 5. [IPv6中"::"和"::1"的区别](https://superuser.com/questions/1727006/what-is-the-difference-between-ipv6-addresses-and-1)
-::1相当于localhost，::相当于0.0.0.0
+::1相当于localhost, ::相当于0.0.0.0
 
-实现的[Socks5 server](./socks5_server.py), 监听1080, client使用chrome的某插件，配置服务的地址, 如果本地测试udp代理，使用如下文件和工具:  
+实现的[Socks5 server](./socks5_server.py), 监听1080, client使用chrome的某插件, 配置服务的地址, 如果本地测试udp代理, 使用如下文件和工具:  
 - [client](./socks5_client.py), 监听1081
 - [udp echo server](./udp_echo_server.py) 监听9000
 - 启动nc模拟client发送消息到[Socks5 client](./socks5_client.py)   
@@ -705,7 +793,7 @@ nc -v -4 -t localhost 1081
 # hello
 # hello
 ```
-发送消息后，能看到nc收到echo消息, **Scoks5 client代码里面写死了目的地**
+发送消息后, 能看到nc收到echo消息, **Scoks5 client代码里面写死了目的地**
 ## 2023-09-11
 ### Message Digest
 1. Message digest also known as **cryptographic hashes**
@@ -713,15 +801,15 @@ nc -v -4 -t localhost 1081
 3. SHA-2 family, SHA256 is currently the default hash function that's used in the TLS protocol, as well as the default signing function for X.509 and SSH keys.  
 ### MAC and HMAC(Hash-based Message Authentication Code)
 1. MAC_function(message, secret_key)  
-2. 相比于Message Digest仅提供完整性(integrity), MAC还提供了不可伪造保护，因为需要密钥(authenticity). 相对于Digital Signature，数字签名还提供了不可否认性，因为使用私钥签名，私钥只在一个人手中  
+2. 相比于Message Digest仅提供完整性(integrity), MAC还提供了不可伪造保护, 因为需要密钥(authenticity). 相对于Digital Signature, 数字签名还提供了不可否认性, 因为使用私钥签名, 私钥只在一个人手中  
 ### KDF(Key Derivation Function), 代表有PBKDF2, scrypt, HKDF(HMAC-based KDF)等
 1. encryption key和password区别
-Encryption key用于对称加密算法中，一般来说，需要固定长度位数，可读性差; password则相反
+Encryption key用于对称加密算法中, 一般来说, 需要固定长度位数, 可读性差; password则相反
 2. KDF takes the following parameters
 IKM(Input Key Material), Salt, Info(Application-specific information), PRF(Pseudorandom Function), Function-specific params(interation count or others(scrypt使用参数)), OKM(Output Key Material) length
 ### Asymmetric Encryption and Decryption
 1. a private key and a public key form a **keypair**
-2. Man in the Middle attac(中间人攻击)，提起非对称加密就要提及中间人攻击，密钥运送问题
+2. Man in the Middle attac(中间人攻击), 提起非对称加密就要提及中间人攻击, 密钥运送问题
 3. 非对称加密算法(asymmetric crypto algorithm)有RSA, DSA, ECDSA, DH, ECDH等算法
 ### Certificates and TLS
 ```shell
@@ -745,11 +833,11 @@ plain_text = raw_data.decode()
 assert plain_text.encode() == raw_data
 ```
 ## 2023-08-30
-计算handshake相关密钥，使用的hash包括client hello, server hello, 不包括各自的recored header(5 bytes)
-Tls1.3中计算application相关密钥时候，需要使用header hash，内容包括client hello, server hello, encrypted extension, Certificate, Certificate Verify, Finished, 假设没有CertificateRequest, 不包括各自的record header(5 bytes)
+计算handshake相关密钥, 使用的hash包括client hello, server hello, 不包括各自的recored header(5 bytes)
+Tls1.3中计算application相关密钥时候, 需要使用header hash, 内容包括client hello, server hello, encrypted extension, Certificate, Certificate Verify, Finished, 假设没有CertificateRequest, 不包括各自的record header(5 bytes)
 ## 2023-08-29
-1. Python和C互相调用, 场景虽然用到不多，但是考虑性能的代码却要使用，比如crypto相关的AEAD，head protection代码使用C代码重写  
-**需要注意的是，windows和linux平台import时的模块后缀有不同，网上大多举例windows平台，在linux平台可能会报模块没找到问题**
+1. Python和C互相调用, 场景虽然用到不多, 但是考虑性能的代码却要使用, 比如crypto相关的AEAD, head protection代码使用C代码重写  
+**需要注意的是, windows和linux平台import时的模块后缀有不同, 网上大多举例windows平台, 在linux平台可能会报模块没找到问题**
 ```python
 # 判断当前平台的支持导入后缀
 import importlib
@@ -765,7 +853,7 @@ print(sys.path)
 1. ```bytes.fromhex("0003") -> b'\x00\x03'```
 2. ```int.from_bytes(b"\x00\x03", byteorder="big") -> '0x3'```
 3. [from contextlib import contextmanager](https://docs.python.org/3/library/contextlib.html)
-代码中大量应用，比如在解析TLS协议时候，新申请空间，yeild，最后做些校验或者释放资源
+代码中大量应用, 比如在解析TLS协议时候, 新申请空间, yeild, 最后做些校验或者释放资源
 ```python
 from contextlib import contextmanager
 
@@ -789,7 +877,7 @@ with managed_resource(timeout=3600) as resource:
 2. PSK-only
 3. PSK with (EC)DHE
 - 各个过程密钥生成过程  
-**hello_hash是不含有record header的，即不包括记录的前5个字节**
+**hello_hash是不含有record header的, 即不包括记录的前5个字节**
 ```python
 # early key生成过程
 early_secret = HKDF_Extract(length=32, key=psk, salt=b"\x00")
@@ -824,10 +912,10 @@ server_application_iv = HKDF_Expand(length=12, label="tsl13 iv", hash=b"", key=s
 ### 阅读[Demystifying cryptography with OpenSSL 3.0](https://download.bibis.ir/Books/Security/IT-Security/Cryptography/2022/Demystifying-Cryptography-with-OpenSSL-3.0-Discover-the-best-techniques-to-enhance-your-network-security-with-OpenSSL-3.0-(Khlebnikov,-AlexeiAdolfsen,-Jarle)_bibis.ir.pdf)
 1. an encryption key is not the same as a password, but an encryption key can be derived from a password
 2. It is important to know that when a message is signed, usually, the digital signature algorithm is not applied to the message itself. Instead, the signature algorithm is applied to the message digest, which is produced by some cryptographic hash functions, such as SHA-256. 
-3. asymmetric encryption每次最多加密自己的key长度的plain text，这就是为什么RSA要使用加密session key(symmetric encrpytion)的方式, 说白了，非对称加密是为了解决对称密钥传送的问题
-4. DSA(Digital Signature Algorithm)使用非对加密的private key加密信息的**hash**，private_key_sign(sha(message))
+3. asymmetric encryption每次最多加密自己的key长度的plain text, 这就是为什么RSA要使用加密session key(symmetric encrpytion)的方式, 说白了, 非对称加密是为了解决对称密钥传送的问题
+4. DSA(Digital Signature Algorithm)使用非对加密的private key加密信息的**hash**, private_key_sign(sha(message))
 ## 2023-08-24
-1. long header packet需要加密第一个自己的后4位，short header packet是第一个自己的后5位
+1. long header packet需要加密第一个自己的后4位, short header packet是第一个自己的后5位
 ```
 Initial Packet {
      Header Form (1) = 1,
@@ -863,11 +951,11 @@ Initial Packet {
      Protected Payload (..),    # Remainder
 }
 ```
-2. 使用包加密后，再使用头部加密
-3. 头部加密使用头保护密钥和packet payload中的密文采样。因为packet number length是不定的，最大4 bytes，采样的起始offset使用4减去实际的packet number length
-4. aioquic中header_length是payload之前的内容长度, 截至packet number的尾部，例如，initial packet中长度是开始至packet number结尾; packet header中的rest length = packet nuber length + paylaod length + 16(AEAD tag)
-5. short header packet首字节中第6位表示key phase，用于提醒对端需要更新密钥, 处理过程详见[此处](./src/aioquic/quic/crypto.py#L82)
-6. TLS1.3中，使用密钥推导算法[HKDF](https://suntus.github.io/2019/05/09/HKDF%E7%AE%97%E6%B3%95/)计算密钥
+2. 使用包加密后, 再使用头部加密
+3. 头部加密使用头保护密钥和packet payload中的密文采样。因为packet number length是不定的, 最大4 bytes, 采样的起始offset使用4减去实际的packet number length
+4. aioquic中header_length是payload之前的内容长度, 截至packet number的尾部, 例如, initial packet中长度是开始至packet number结尾; packet header中的rest length = packet nuber length + paylaod length + 16(AEAD tag)
+5. short header packet首字节中第6位表示key phase, 用于提醒对端需要更新密钥, 处理过程详见[此处](./src/aioquic/quic/crypto.py#L82)
+6. TLS1.3中, 使用密钥推导算法[HKDF](https://suntus.github.io/2019/05/09/HKDF%E7%AE%97%E6%B3%95/)计算密钥
 ```python
 # protect client initial packet
 initial_salt = binascii.unhexlify("38762cf7f55934b34d179ae6a4c80cadccbb7f0a")
@@ -887,9 +975,9 @@ header[0] ^= mask[0] & 0x0f
 header[pn_offset..pn_offset+pn_size] ^= mask[1..pn_size]
 protected_content = header + protected_payload
 ```
-**Server initial packet protection like client, 需要注意的是cid还是使用client initial packet中的source destination id**, 具体实现参考[代码](./protection.py)，或者[C实现](./protection.c)  
+**Server initial packet protection like client, 需要注意的是cid还是使用client initial packet中的source destination id**, 具体实现参考[代码](./protection.py), 或者[C实现](./protection.c)  
 
-7. [aioquic中receiver支持decode packet number，但是sender固定packet number length 为2](https://github.com/aiortc/aioquic/issues/200)
+7. [aioquic中receiver支持decode packet number, 但是sender固定packet number length 为2](https://github.com/aiortc/aioquic/issues/200)
 8. python中需要注意的两种字节表示
 ```python
 raw = b'1234' # 内存中表示为31323334
@@ -899,12 +987,12 @@ binascii.hexlify(raw) # b'31323334'
 binascii.unhexlify(raw) # b'\x124'
 binascii.a2b_hex(hex_str) # 01020304
 
-# 首先将raw转化为内存形式0x31323334，然后取2个字节3132转化为整数
+# 首先将raw转化为内存形式0x31323334, 然后取2个字节3132转化为整数
 struct.unpack('HH', raw) # (12849, 13363) -> (0x3231, 0x3433)
 struct.unpack('HH', hex_str) # (513, 1027) -> (0x201, 0x403)
 struct.unpack('>HH', hex_str) # (258, 1027) -> (0x102, 0x304)
 ```
-8. **解密大致跟加密步骤差不多，有一点需要注意，short packet中有key phase(first_byte & 4)，key phase是变更时，header protection remove还是使用原先的密钥(hp)，payload解密使用新生成的密钥，原因是只有拿到里header才能确认key phase是否变更了:)**
+8. **解密大致跟加密步骤差不多, 有一点需要注意, short packet中有key phase(first_byte & 4), key phase是变更时, header protection remove还是使用原先的密钥(hp), payload解密使用新生成的密钥, 原因是只有拿到里header才能确认key phase是否变更了:)**
 9. Openssl command line encryption
 ```shell
 # 使用HKDF算法获取client key
@@ -912,7 +1000,7 @@ struct.unpack('>HH', hex_str) # (258, 1027) -> (0x102, 0x304)
 # salt: 38762cf7f55934b34d179ae6a4c80cadccbb7f0a
 # label(encode('tls client in')): 00200f746c73313320636c69656e7420696e00
 openssl kdf -keylen 32 -kdfopt digest:SHA2-256 -kdfopt hexkey:8394c8f03e515708 -kdfopt hexsalt:38762cf7f55934b34d179ae6a4c80cadccbb7f0a -kdfopt hexinfo:00200f746c73313320636c69656e7420696e00 HKDF
-# 根据protected payload内容获取sample，然后使用AES-128-ECB算法获取mask
+# 根据protected payload内容获取sample, 然后使用AES-128-ECB算法获取mask
 echo -e -n "\\xd1\\xb1\\xc9\\x8d\\xd7\\x68\\x9f\\xb8\\xec\\x11\\xd2\\x42\\xb1\\x23\\xdc\\x9b" > sample.txt
 openssl enc -aes-128-ecb -v -p -e -nosalt -K 9f50449e04a0e810283a1e9933adedd2 -in sample.txt -out sample.aes
 ```

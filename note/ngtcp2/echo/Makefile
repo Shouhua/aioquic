@@ -9,11 +9,14 @@ EXE=client server
 
 # -Wl,--trace-symbol,SYMBOL
 # CREF=-Wl,--cref
-TRACE=-Wl,--trace # 打印GCC搜寻共享库目录
-RPATH=-Wl,-rpath=/usr/local/lib64
-PEDANTIC=-pedantic
-CFLAGS= -g -Wall -Wextra -DDEBUG\
+TRACE := -Wl,--trace # 打印GCC搜寻共享库目录
+ENABLE_RUN_PATH := -Wl,--enable-new-dtags
+DISABLE_RUN_PATH := -Wl,--disable-new-dtags
+RPATH := -Wl,-rpath=/usr/local/lib64
+PEDANTIC := -pedantic
+CFLAGS := -g -Wall -Wextra -DDEBUG\
 	${PEDANTIC} \
+	${ENABLE_RUN_PATH} \
 	${RPATH} \
 	# ${CREF} \
 	# ${TRACE} 
