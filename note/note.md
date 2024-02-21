@@ -1,5 +1,14 @@
+## 2024-02-21
+### socket地址以及转化
+sockaddr(过时的，用于IPv4), sockaddr_storage(IPv4, IPv6), sockaddr_in, sockaddr_in6
+htons, ntohl, ntohs, ntohl
+inet_addr, inet_aton, inet_ntoa(过时的，用于IPv4)
+inet_pton, inet_ntop(IPv4, IPv6)
+
 ## 2024-02-20
 ### [quic-echo](./ngtcp2/echo), 使用ngtcp2实现server echo client发送的信息, 依赖tmux, 详情见[Makefile](./ngtcp2/echo/Makefile)
+
+### [Understand Dynamic Loading](https://amir.rachum.com/shared-libraries/)
 
 ### [quictls](https://github.com/quictls/openssl)编译运行问题
 环境: Ubuntu 22.04.4 LTS, gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0<br>  
