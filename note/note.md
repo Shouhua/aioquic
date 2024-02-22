@@ -1,9 +1,51 @@
+## 2024-02-22
+### C中隐藏内部结构
+header文件中声明对外结构，实际声明在C文件中，如果要获取结构中内容，提供相关的接口，比如
+```c
+// connection.h
+typedef struct _Connection Connection;
+// connection.c
+#include <connection.h>
+struct _Connection
+{
+     struct sockaddr_storage remote_addr;
+} _Connection;
+
+struct sockaddr_storage *connection_get_remote_addr(Connection *conn)
+{
+     return &conn->remote_addr;
+}
+
+```
+
 ## 2024-02-21
-### socket地址以及转化
-sockaddr(过时的，用于IPv4), sockaddr_storage(IPv4, IPv6), sockaddr_in, sockaddr_in6
-htons, ntohl, ntohs, ntohl
-inet_addr, inet_aton, inet_ntoa(过时的，用于IPv4)
-inet_pton, inet_ntop(IPv4, IPv6)
+### [socket地址以及转化](./sockaddr.c)
+```c
+// struct sockaddr 用于装载协议地址内容，比如ipv4等协议，但是IPv6需要更大，出现了sockaddr_storage, 以前的接口都是使用struct sockaddr，现在可以混合使用sockaddr_storage， 然后指定size
+
+#include <sys/socket.h> // AF_INET, AF_INET6
+#include <netinet/in.h> // struct sockaddr_in, struct sockaddr_in6
+#include <arpa/inet.h> // inet_aton, inet_ntoa, inet_pton, inet_ntop
+
+struct sockaddr_storage addr;
+memset(&addr, 0, sizeof(struct sockaddr_storage));
+if (isIPv6 == TRUE)
+{
+    struct sockaddr_in6 *addr_v6 = (struct sockaddr_in6 *)&addr;
+    addr_v6->sin6_family = AF_INET6;
+    addr_v6->sin6_port = 1234;
+    inet_pton(AF_INET6, "2001:3211::1", &(addr_v6->sin6_addr));
+}
+else
+{
+    struct sockaddr_in *addr_v4 = (struct sockaddr_in *)&addr;
+    addr_v4->sin_family = AF_INET;
+    addr_v4->sin_port = 1234;
+    inet_aton("192.168.1.228", &(addr_v4->sin_addr));
+}
+ // 注意这里的addr和后面的size
+sendto(sock, buf, len, 0, (struct sockaddr *)&addr, sizeof(struct sockaddr_storage));
+```
 
 ## 2024-02-20
 ### [quic-echo](./ngtcp2/echo), 使用ngtcp2实现server echo client发送的信息, 依赖tmux, 详情见[Makefile](./ngtcp2/echo/Makefile)
