@@ -1,3 +1,27 @@
+## 2024-02-26
+### [zlib](https://www.zlib.net/)
+zlib实现了压缩和解压缩算法, 提供了对外接口。
+python中对应的zlib.compress, zlib.adler32，gzip.compress等
+rfc1951描述的是DEFLATE算法和封装格式
+rfc1950, rfc1952分别描述了zlib和gzip两种封装格式，底层使用的DEFLATE这种算法。
+TODO: 解释gzip的头部数据和压缩数据，其中压缩数据与DEFLATE数据的联系<br>
+" ".join([f"{e:02x}" for e in gzip.compress(b"hello,world!\n")])
+./zlib <<< $'hello,world!' > compress.bin
+比较上面compress.bin和python代码输出，发现压缩内容是相同的
+cb 48 cd c9 c9 d7 29 cf 2f ca 49 51 e4 02 00
+只是头部都不一样; zlib.c是DEFLATE, 这个跟http里面的response一直，见zlib.js, gzip也是一样。
+http中vary
+Transfer-Encoding: chunked
+Content-Encoding: deflate # deflate gzip br
+defalte头部和数据是分开的，比如
+32 0d 0a (后面数据是2个字节)
+78 9c 0d 0a (deflate头部)
+31 33 0d 0a (压缩数据长度)
+cb 48 cd c9 c9 d7 29 cf 2f ca 49 51 e4 02 00 23 71 04 94 (压缩数据，包括后面4个字节的adler32校验数据)
+30 0d 0a 0d 0a (0的ascii值，chunked数据结束)
+zlib.c对应的defalte格式, 对应于http里面的
+可以查看raw.txt.gz格式就是gzip的数据头部和压缩数据，使用zlib.js中的代码生成。
+
 ## 2024-02-22
 ### C中隐藏内部结构
 header文件中声明对外结构，实际声明在C文件中，如果要获取结构中内容，提供相关的接口，比如
