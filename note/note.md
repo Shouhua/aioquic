@@ -1,30 +1,122 @@
 ## 2024-02-26
 ### [zlib](https://www.zlib.net/)
-zlib实现了压缩和解压缩算法, 提供了对外接口。
-python中对应的zlib.compress, zlib.adler32，gzip.compress等
-rfc1951描述的是DEFLATE算法和封装格式
-rfc1950, rfc1952分别描述了zlib和gzip两种封装格式，底层使用的DEFLATE这种算法。
-TODO: 解释gzip的头部数据和压缩数据，其中压缩数据与DEFLATE数据的联系<br>
-" ".join([f"{e:02x}" for e in gzip.compress(b"hello,world!\n")])
-./zlib <<< $'hello,world!' > compress.bin
-比较上面compress.bin和python代码输出，发现压缩内容是相同的
-cb 48 cd c9 c9 d7 29 cf 2f ca 49 51 e4 02 00
-只是头部都不一样; zlib.c是DEFLATE, 这个跟http里面的response一直，见zlib.js, gzip也是一样。
-http中vary
-Transfer-Encoding: chunked
-Content-Encoding: deflate # deflate gzip br
-defalte头部和数据是分开的，比如
-32 0d 0a (后面数据是2个字节)
-78 9c 0d 0a (deflate头部)
-31 33 0d 0a (压缩数据长度)
-cb 48 cd c9 c9 d7 29 cf 2f ca 49 51 e4 02 00 23 71 04 94 (压缩数据，包括后面4个字节的adler32校验数据)
-30 0d 0a 0d 0a (0的ascii值，chunked数据结束)
-zlib.c对应的defalte格式, 对应于http里面的
-可以查看raw.txt.gz格式就是gzip的数据头部和压缩数据，使用zlib.js中的代码生成。
+1. zlib是什么
+zlib库提供内存压缩和解压缩功能, 包括未压缩数据的完整性检查。
+
+2. 概念
+- [`Deflate`（通常按早期计算机编程习惯写为`DEFLATE`）是同时使用了`LZ77`算法与哈夫曼编码(`Huffman Coding`)的一个无损数据压缩算法](https://zh.wikipedia.org/wiki/Deflate), 已经标准化参考[RFC 1951](https://datatracker.ietf.org/doc/html/rfc1951)。
+- `zlib` 可以被认为是一种 `DEFALTE` 算法的封装格式, 标准化参考 [RFC 1950](https://datatracker.ietf.org/doc/html/rfc1950). 目前`zlib`库只支持`DEFLATE`算法, `zlib`已经成为了事实上的业界标准, 标准文档中, `zlib`和`DEFLATE`常常互换使用, 比如常见的`http`协议压缩格式就使用`deflate`代表`zlib`封装格式(`Content-Encoding: defalte`)。
+- `gzip` 也可以认为是一种`DEFLATE`算法的封装格式, 标准化参考[RFC 1952](https://datatracker.ietf.org/doc/html/rfc1952), 由于`gzip`仅用来压缩单个文件, 多个文件的压缩归档先合并成tar包, 然后再使用gzip进行压缩, 最后生成`.tar.gz`文件(`tarball`或者tar压缩包)。`gunzip`是解压缩gzip包命令. 其中 `g` 表示`graits`(免费)的意思; gzip也是http协议内容压缩的选项之一。
+- `zip`格式, 也使用DEFLATE算法, 相对于gzip来说, 可以包容多个文件, 但是zip是对每个文件单独压缩, 没有利用文件间的冗余信息, 压缩率会稍逊于tar压缩包。
+
+3. 各种语言的实现
+下面以 `hello,world!\n` 为数据看下各个版本的实现。
+```shell
+# 原始DEFLATE算法压缩数据
+# cb48cdc9c9d729cf2fca4951e40200
+# zlib或者defalte格式数据
+# 789c cb48cdc9c9d729cf2fca4951e40200 23710494
+# 789c 表示认为是zlib或者deflate格式的magic number; 23710494是原始数据的adler32校验数据
+# gzip一般使用10字节的头部, 尾部由4字节的CRC校验和4字节原始数据大小组成, 不同语言的头部字段有可能不一样, 比如日期可以是0等
+# 1f8b08000867dd6502ff cb48cdc9c9d729cf2fca4951e40200 fbba78560d000000
+# 1f8b08可以认为是gzip的magic number; 00 表示flags, 没有任何附加字段; 0867dd65当前时间戳, 如果是文件可能是修改的时间戳; 
+# 02 DEFLATE算法使用的算法等级(最慢的, 04表示最快); ff 表示OS代码(unknown, 03表示unix)
+# 后缀fbba7856表示原始数据的CRC校验码; d000000表示原始数据的长度(13)
+```
+```python
+import zlib, gzip, datetime
+raw_data = b"hello,world!\n"
+# 注意二进制数据的大小端
+hex(zlib.crc32(raw_data))
+# fbba7856 
+hex(zlib.adler32(raw_data))
+# 23710494
+"".join([ f"{i:02x}" for i in zlib.compress(raw_data) ])
+# 789ccb48cdc9c9d729cf2fca4951e4020023710494
+"".join([ f"{i:02x}" for i in gzip.compress(raw_data) ])
+# 1f8b08000867dd6502ffcb48cdc9c9d729cf2fca4951e40200fbba78560d000000
+int.from_bytes(b'\x86\x7d\xd6\x50', byteorder="little")
+# 1709008648
+datetime.datetime.fromtimestamp(1709008648)
+```
+
+C语言参考[zlib.c](./zlib/zlib.c)文件和pigz命令
+```shell
+# https://www.zlib.net/zpipe.c
+# install zlib
+gcc -Wall -Wextra -pedantic -o zlib zlib.c $(pkg-config --libs zlib)
+./zlib <<< $'hello,world!' > compressed.bin
+./zlib -d < compressed.bin
+# OR
+pigz -d < compressed.bin
+xxd -ps compress.bin
+# zlib或者defalte格式压缩数据
+# 789ccb48cdc9c9d729cf2fca4951e4020023710494
+```
+
+JS语言参考[zlib.js](./zlib/zlib.js)文件
+```js
+// 注释一部分是根据文件生成gzip文件, 可以查看raw.txt.gz的内容查看
+xxd -ps raw.txt.gz
+
+// 1f8b0800000000000003cb48cdc9c9d729cf2fca4951e40200fbba78560d000000
+// 现有部分为http server, 主要是验证Content-Encoding, 运行后使用chrome请求和wireshark查看
+echo 'hello,world!' > raw.txt 
+tshark -i lo -w zlib.pcapng 'tcp and port 1337 
+curl -H 'Accept-Encoding: deflate' --compressed localhost:1337
+tshark -r zlib.pcapng -Px -Y 'http'
+
+// Content-Encoding: defalte 格式头部和数据是分开的, 以下是Transfer-Encoding: chunked的数据
+32 0d 0a (表示长度, 后面数据是2个字节)
+78 9c 0d 0a (deflate头部, 789c)
+31 33 0d 0a (压缩数据长度, 13个字节)
+cb 48 cd c9 c9 d7 29 cf 2f ca 49 51 e4 02 00 23 71 04 94 (压缩数据, 包括后面4个字节的adler32校验数据)
+30 0d 0a 0d 0a (0的ASCII值, chunked数据结束)
+```
+
+### zlib格式标准 [RFC 1950](https://datatracker.ietf.org/doc/html/rfc1950)
+通常两个字节头部(可以存在扩展字段)和四个字节adler32原始数据校验值
+1. 两个字节头部：[CMF，FLG](https://stackoverflow.com/questions/9050260/what-does-a-zlib-header-look-like)
+```
+# 常用值
+78 01 - No Compression/low
+78 5E - Fast Compression
+78 9C - Default Compression
+78 DA - Best Compression
+
+CMF
+bits 0 to 3  CM     Compression method, 8代表DEFLATE算法
+bits 4 to 7  CINFO  Compression info, 7代表32k window size
+FLG
+bits 0 to 4  FCHECK  (check bits for CMF and FLG), 保证2个头部字节是31的倍数, (CMF*256 + FLG)/31
+bit  5       FDICT   (preset dictionary), 0
+bits 6 to 7  FLEVEL  (compression level), 2代表default compression algorithm
+```
+
+### gzip格式标准 [RFC 1952](https://datatracker.ietf.org/doc/html/rfc1952)
+通常十个字节头部和八个字节尾部，包括四字节CRC32原始数据校验值和四字节原始数据长度
+1. 十字节头部
+```
+ID1|ID2|CM |FLG|     MTIME     |XFL|OS 
+ID1(0x1f), ID2(0x8b) 为gzip的magic number，标识为gzip格式
+CM Compress Method, 8代表DEFLATE
+FLG, 不描述，见文档
+     bit 0   FTEXT
+     bit 1   FHCRC
+     bit 2   FEXTRA
+     bit 3   FNAME
+     bit 4   FCOMMENT
+     bit 5   reserved
+     bit 6   reserved
+     bit 7   reserved
+MTIME The most recent Modification Time of original file, 如果是字节流，则为当前时间戳
+XFL eXtra Flags, 2为最大压缩，4为最快速度
+OS Operation System, 3为Unix, 255为unknown
+```
 
 ## 2024-02-22
 ### C中隐藏内部结构
-header文件中声明对外结构，实际声明在C文件中，如果要获取结构中内容，提供相关的接口，比如
+header文件中声明对外结构, 实际声明在C文件中, 如果要获取结构中内容, 提供相关的接口, 比如
 ```c
 // connection.h
 typedef struct _Connection Connection;
@@ -45,7 +137,7 @@ struct sockaddr_storage *connection_get_remote_addr(Connection *conn)
 ## 2024-02-21
 ### [socket地址以及转化](./sockaddr.c)
 ```c
-// struct sockaddr 用于装载协议地址内容，比如ipv4等协议，但是IPv6需要更大，出现了sockaddr_storage, 以前的接口都是使用struct sockaddr，现在可以混合使用sockaddr_storage， 然后指定size
+// struct sockaddr 用于装载协议地址内容, 比如ipv4等协议, 但是IPv6需要更大, 出现了sockaddr_storage, 以前的接口都是使用struct sockaddr, 现在可以混合使用sockaddr_storage,  然后指定size
 
 #include <sys/socket.h> // AF_INET, AF_INET6
 #include <netinet/in.h> // struct sockaddr_in, struct sockaddr_in6
@@ -177,15 +269,15 @@ ld --verbose | grep SEARCH_DIR | tr -s ' ;' '\n'
 # OR
 ldconfig -v 2>/dev/null | grep '^/'
 ```
-2. 存在两个一样的共享库，需要解决冲突, 明确指定引用的库路径
+2. 存在两个一样的共享库, 需要解决冲突, 明确指定引用的库路径
 运行时, 如果共享库找不到, 很可能编译时路径能找到共享库, 但是运行时找不到, 将路径添加到 `LD_LIBRARY_PATH`, 或者在编译时设置连接器参数 `-Wl,rpath=/usr/local/lib64` 设置elf文件的[`DT_RPATH`或者`DT_RUNPATH`](https://en.wikipedia.org/wiki/Rpath)。
 
 ### pkg-config
-`pkg-config`跟`ld`不一样，前者用于给出编译时的链接参数，有时候使用编译工具时很方便给出`libs`和`includes`。quictls编译后生成的共享库有`libssl.so.81.3`, 其中 **81** 为 **Q** 的ASCII码值，用于区别官方openssl的共享库。
+`pkg-config`跟`ld`不一样, 前者用于给出编译时的链接参数, 有时候使用编译工具时很方便给出`libs`和`includes`。quictls编译后生成的共享库有`libssl.so.81.3`, 其中 **81** 为 **Q** 的ASCII码值, 用于区别官方openssl的共享库。
 ```shell
 pkg-config --variable=pc_path pkg-config | tr ':' '\n' # pkg-config默认搜索路径, PKG_CONFIG_PATH对这个路径没有影响
 
-PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig pkg-config --libs libssl # 先检索PKG_CONFIG_PATH, 如果检索不到，在检索默认路径
+PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig pkg-config --libs libssl # 先检索PKG_CONFIG_PATH, 如果检索不到, 在检索默认路径
 # -L/usr/local/lib64 -lssl
 
 pkg-config --libs libssl
