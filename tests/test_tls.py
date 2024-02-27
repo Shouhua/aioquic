@@ -1,6 +1,7 @@
 import binascii
 import datetime
 import ssl
+from functools import partial
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -1570,7 +1571,7 @@ class VerifyCertificateTest(TestCase):
             certificate = load_pem_x509_certificates(fp.read())[0]
 
         with patch("aioquic.tls.utcnow") as mock_utcnow:
-            mock_utcnow.return_value = certificate.not_valid_before
+            mock_utcnow.return_value = certificate.not_valid_before_utc
 
             # fail
             with self.assertRaises(tls.AlertBadCertificate) as cm:
@@ -1592,7 +1593,7 @@ class VerifyCertificateTest(TestCase):
         )
 
         with patch("aioquic.tls.utcnow") as mock_utcnow:
-            mock_utcnow.return_value = certificate.not_valid_before
+            mock_utcnow.return_value = certificate.not_valid_before_utc
 
             # fail
             with self.assertRaises(tls.AlertBadCertificate) as cm:
@@ -1621,7 +1622,7 @@ class VerifyCertificateTest(TestCase):
         #  too early
         with patch("aioquic.tls.utcnow") as mock_utcnow:
             mock_utcnow.return_value = (
-                certificate.not_valid_before - datetime.timedelta(seconds=1)
+                certificate.not_valid_before_utc - datetime.timedelta(seconds=1)
             )
             with self.assertRaises(tls.AlertCertificateExpired) as cm:
                 verify_certificate(
@@ -1631,21 +1632,21 @@ class VerifyCertificateTest(TestCase):
 
         # valid
         with patch("aioquic.tls.utcnow") as mock_utcnow:
-            mock_utcnow.return_value = certificate.not_valid_before
+            mock_utcnow.return_value = certificate.not_valid_before_utc
             verify_certificate(
                 cadata=cadata, certificate=certificate, server_name="example.com"
             )
 
         with patch("aioquic.tls.utcnow") as mock_utcnow:
-            mock_utcnow.return_value = certificate.not_valid_after
+            mock_utcnow.return_value = certificate.not_valid_after_utc
             verify_certificate(
                 cadata=cadata, certificate=certificate, server_name="example.com"
             )
 
         # too late
         with patch("aioquic.tls.utcnow") as mock_utcnow:
-            mock_utcnow.return_value = certificate.not_valid_after + datetime.timedelta(
-                seconds=1
+            mock_utcnow.return_value = (
+                certificate.not_valid_after_utc + datetime.timedelta(seconds=1)
             )
             with self.assertRaises(tls.AlertCertificateExpired) as cm:
                 verify_certificate(
@@ -1658,7 +1659,7 @@ class VerifyCertificateTest(TestCase):
         cadata = certificate.public_bytes(serialization.Encoding.PEM)
 
         with patch("aioquic.tls.utcnow") as mock_utcnow:
-            mock_utcnow.return_value = certificate.not_valid_before
+            mock_utcnow.return_value = certificate.not_valid_before_utc
 
             # certificates with no SubjectAltName are rejected
             with self.assertRaises(tls.AlertBadCertificate) as cm:
@@ -1677,7 +1678,7 @@ class VerifyCertificateTest(TestCase):
         cadata = certificate.public_bytes(serialization.Encoding.PEM)
 
         with patch("aioquic.tls.utcnow") as mock_utcnow:
-            mock_utcnow.return_value = certificate.not_valid_before
+            mock_utcnow.return_value = certificate.not_valid_before_utc
 
             # valid
             verify_certificate(
@@ -1707,7 +1708,7 @@ class VerifyCertificateTest(TestCase):
         cadata = certificate.public_bytes(serialization.Encoding.PEM)
 
         with patch("aioquic.tls.utcnow") as mock_utcnow:
-            mock_utcnow.return_value = certificate.not_valid_before
+            mock_utcnow.return_value = certificate.not_valid_before_utc
 
             # valid
             verify_certificate(
@@ -1724,3 +1725,19 @@ class VerifyCertificateTest(TestCase):
                 "hostname '8.8.8.8' doesn't match "
                 "IPAddressPattern(pattern=IPv4Address('1.2.3.4'))",
             )
+
+    def test_pull_greased_alpn_list(self):
+        """Test pulling a list alpns with an ASCII item, an undecodable binary value
+        such as greasing might give us, a valid UTF-8 encoding, and another ASCII item.
+        We should only return the ASCII values.
+
+        We currently only accept ASCII ALPNs, even though technically ALPNs are
+        arbitrary bytes values, as our API is a list of strings.
+        """
+
+        # the buffer is equivalent to "H2", b'\xff\xff', "é" in UTF-8, "H3"
+        buf = Buffer(data=binascii.unhexlify("000c02483202ffff02c3a9024833"))
+
+        self.assertEqual(
+            tls.pull_list(buf, 2, partial(tls.pull_alpn_protocol, buf)), ["H2", "H3"]
+        )
