@@ -1,3 +1,13 @@
+## 2024-02-29
+### pigz
+1. pigz获取原始DELFATE算法数据
+```shell
+pigz -k -z -c -f raw.txt | xxd -ps | tail --bytes=+5 | head --bytes=-9
+```
+**BASH中凡是字符跟字节关系的，想到hexdump, xxd或者od**
+
+2. 在[zlib.c](./zlib/zlib.c)使用deflateInit2代替deflateInit，设置`windowBits`参数为负数可以输出原始DEFLATE算法的数据
+
 ## 2024-02-26
 ### [zlib](https://www.zlib.net/)
 1. zlib是什么
@@ -52,6 +62,8 @@ pigz -d < compressed.bin
 xxd -ps compress.bin
 # zlib或者defalte格式压缩数据
 # 789ccb48cdc9c9d729cf2fca4951e4020023710494
+
+# 在zlib.c使用deflateInit2代替deflateInit，可以输出原始DEFLATE算法的数据
 ```
 
 JS语言参考[zlib.js](./zlib/zlib.js)文件

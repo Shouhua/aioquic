@@ -54,6 +54,10 @@ int def(FILE *source, FILE *dest, int level)
 	strm.zalloc = Z_NULL;
 	strm.zfree = Z_NULL;
 	strm.opaque = Z_NULL;
+	/* 使用deflateInit2代替deflateInit，设置第四个参数windowBits可以输出DEFLATE算法原始数据
+	** windowBits can also be -8..-15 for raw deflate
+	*/
+	// ret = deflateInit2(&strm, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);
 	ret = deflateInit(&strm, level);
 	if (ret != Z_OK)
 		return ret;
