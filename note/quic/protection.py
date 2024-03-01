@@ -7,8 +7,6 @@ from cryptography.hazmat.backends.openssl.backend import backend
 from cryptography.hazmat.primitives import hashes, hmac
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 
-# https://blog.unasuke.com/2021/read-quic-initial-packet-by-ruby/
-
 
 class CipherSuite(IntEnum):
     AES_128_GCM_SHA256 = 0x1301
@@ -236,6 +234,11 @@ def encrypt_packet(
 
     nonce = generate_nonce(iv, pn)
 
+    print(binascii.hexlify(key))
+    print(binascii.hexlify(iv))
+    print(binascii.hexlify(hp))
+    print(binascii.hexlify(nonce))
+
     hp_cipher_name, aead_cipher_name = CIPHER_SUITES[cipher_suite]
 
     evp_cipher = backend._lib.EVP_get_cipherbyname(aead_cipher_name)
@@ -293,9 +296,11 @@ def encrypt_packet(
         header_evp_cipher,
         backend._ffi.NULL,  # ENGINE *impl
         backend._ffi.from_buffer(hp),  # unsigned char *key
-        backend._ffi.from_buffer(sample)
-        if cipher_suite == CipherSuite.CHACHA20_POLY1305_SHA256
-        else backend._ffi.NULL,  # unsigned char *iv
+        (
+            backend._ffi.from_buffer(sample)
+            if cipher_suite == CipherSuite.CHACHA20_POLY1305_SHA256
+            else backend._ffi.NULL
+        ),  # unsigned char *iv
         1,  # int enc
     )
     maskbuf = backend._ffi.new("unsigned char[]", 16)

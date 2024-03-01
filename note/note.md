@@ -1,3 +1,53 @@
+## 2024-03-01
+### 16进制转化成字符串, 使用sscanf或者使用OPENSSL_hexstr2buf
+sscanf的[format格式介绍](https://docwiki.embarcadero.com/RADStudio/Alexandria/en/Scanf_Format_Specifiers)<br>
+https://www.eskimo.com/~scs/cclass/int/sx2f.html<br>
+`% [*] [width] [F|N] [h|l|L] type_char`
+```c
+unsigned char *hexstr2buf(const char *str)
+{
+	size_t len = strlen(str);
+	if (len % 2 != 0)
+		return NULL;
+	size_t res_len = len / 2 + 1;
+	unsigned char *res = (unsigned char *)malloc(res_len);
+
+	for (int i = 0; i < len; i += 2)
+	{
+		sscanf(str + i, "%2hhx", res + i / 2);
+	}
+	*(res + res_len - 1) = '\0';
+	return res;
+}
+```
+
+### OpenSSL编程中AEAD(Authenticated Encryption with Associated Data)加密[注意点](https://wiki.openssl.org/index.php/EVP_Authenticated_Encryption_and_Decryption)
+对称加密通常使用EVP_EncryptUpdate或者EVP_CipherUpdate
+```c
+__owur int EVP_CipherUpdate(EVP_CIPHER_CTX *ctx, unsigned char *out,
+                            int *outl, const unsigned char *in, int inl);
+
+/*__owur*/ int EVP_EncryptUpdate(EVP_CIPHER_CTX *ctx, unsigned char *out,
+                                 int *outl, const unsigned char *in, int inl);
+```
+1. 必须先加入AAD(Additional Authenticated Data或者叫associated data)数据，这是需要设置out为NULL
+2. 然后加入需要加密数据，加入解密数据后，不能再加入ADD数据
+
+### [ChaCha20-Poly1305](https://en.wikipedia.org/wiki/ChaCha20-Poly1305)
+ChaCha20-Poly1305 类似AES-128-GCM，也是一种AEAD类型算法, ChaCha20是流式对称加密算法，Poly1305是MAC算法(Message Authentication Code)。
+这个算法也加入[IETF协议规范](https://datatracker.ietf.org/doc/html/rfc8439)
+1. ChaCha20可以使用128位或者256位的key，但是在OpenSSL中仅支持256位的key。
+2. OpenSSL中ChaCha20算法使用256位key和128位的IV(32bits counter+96bits nonce)。OpenSSL中默认IV是96bits(12bytes)，所以使用ChaCha20时，需要显式设置下IV长度, 但是ChaCha20-Poly1306使用256bits的key和96bits的IV。
+```c
+/* https://stackoverflow.com/questions/75007626/openssl-3-not-verifying-using-tag-using-chacha20-poly1305
+** https://www.openssl.org/docs/man3.1/man3/EVP_chacha20_poly1305.html
+*/
+EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, 16, NULL)
+```
+3. ChaCha20使用block counter，并且block count大小是32位，在256G以内被认为是安全的，一般网络数据够用，如果超过可以分开重置参数后在加密
+
+4. python密码库有多个，比较常用的有[pycryptography](https://cryptography.io/en/latest/), [pycryptodome](https://www.pycryptodome.org/), 其中pycrypto库不再维护了，作者推荐使用前两个库替换，其中 `pycryptodome` 的API是兼容的。两者都支持 `ChaCha20`和 `ChaCha20-Poly1305` , 但是前者不兼容RFC 8439，后者兼容，但是不支持自定义counter。其中的代码解释见[chacha20_poly1305.py](./quic/chacha20_poly1305.py) 和 [chacha20.c](./quic/chacha20.c) 以及 [chacha20_poly1305.c](./quic/chacha20_poly1305.c) 。
+
 ## 2024-02-29
 ### pigz
 1. pigz获取原始DELFATE算法数据
