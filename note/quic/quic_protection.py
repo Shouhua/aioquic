@@ -300,12 +300,12 @@ def encrypt_packet(
             backend._ffi.from_buffer(sample)
             if cipher_suite == CipherSuite.CHACHA20_POLY1305_SHA256
             else backend._ffi.NULL
-        ),  # unsigned char *iv
+        ),  # unsigned char *iv, ecm是不需要IV的，但是CHAHCA20_POLY1305需要
         1,  # int enc
     )
     maskbuf = backend._ffi.new("unsigned char[]", 16)
     masklen = backend._ffi.new("int *")
-    zero = binascii.unhexlify("0000000000")
+    zero = binascii.unhexlify("0000000000")  # b'\x00\x00\x00\x00\x00'
     if cipher_suite == CipherSuite.CHACHA20_POLY1305_SHA256:
         res = backend._lib.EVP_CipherUpdate(
             ctx, maskbuf, masklen, backend._ffi.from_buffer(zero), len(zero)

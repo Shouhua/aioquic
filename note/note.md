@@ -1,8 +1,36 @@
 ## 2024-03-01
-### 16进制转化成字符串, 使用sscanf或者使用OPENSSL_hexstr2buf
-sscanf的[format格式介绍](https://docwiki.embarcadero.com/RADStudio/Alexandria/en/Scanf_Format_Specifiers)<br>
+### 十六进制转化成字符串, 使用sscanf或者使用OPENSSL_hexstr2buf
+#### sscanf的[format格式介绍](https://docwiki.embarcadero.com/RADStudio/Alexandria/en/Scanf_Format_Specifiers)<br>
 https://www.eskimo.com/~scs/cclass/int/sx2f.html<br>
-`% [*] [width] [F|N] [h|l|L] type_char`
+`%[*][maximum_field_width][length_modifier]conversion_specifier`
+
+|format string| Description | Example | Matching Input | Results |
+|--|--|--|--|--|
+|*| 匹配输入但不赋值 | int anInput;<br> scanf("%*s %i", &anInput); | Age: _29| anInput = 29, return value = 1|
+|maximum_field_width| 标识匹配输入的字节个数 | int anInt;<br>char s[10];<br>scanf("%2i", &anInt);<br>scanf("%9s", s); | 2345<br>VeryLongString | anInt==23,<br>return value==1<br>s=="VeryLongS"<br>return value==1 |
+|length_modifier|标识目的匹配参数的类型(或者叫做大小)|char *src="12";<br>char des[2];<br>sscanf(src, "%2hhx\n", des);<br>printf("des[0] = %d\n",des[0]);||des[0] = 12|
+
+#### sscanf返回值
+正常情况成功返回成功匹配和赋值的个数。
+如果部分成功匹配和赋值，返回成功的个数; 如果input结束(EOF)时，没有匹配成功或者匹配失败，返回EOF, 使用errno查看。
+```c
+// https://wpollock.com/CPlus/PrintfRef.htm#printfLen
+char buf[BUFSIZ], junk[BUFSIZ];
+int income;
+
+fprintf( stderr, "Please enter your income: " );
+// Loop until the user enters a correct value:
+while ( fgets( buf, sizeof(buf), stdin ) != NULL )
+{
+   if ( sscanf( buf, "%i%[^\n]", &income, junk ) == 1 )
+      break;
+   // Do some sort of error processing:
+   fprintf( stderr, "\nError reading your income, please try again.\n" );
+   fprintf( stderr, "Please enter your income: " );
+}
+// income correctly enters read at this point.
+```
+#### hexstr2buf
 ```c
 unsigned char *hexstr2buf(const char *str)
 {
@@ -833,13 +861,15 @@ datetime.strptime("2020-10-11", "%Y-%m-%d") # datetime.datetime(2020, 10, 11, 0,
 ```
 ## 2023-10-11
 ### [locale](https://wiki.archlinuxcn.org/wiki/Locale)
-locate categories: LC_COLLATE, LC_TIME, LC_MESSAGES, LC_NAME<br>
-locale keys: name_fmt<br>
+man 5 locale <br>
+locate categories: LC_COLLATE, LC_TIME, LC_MESSAGES, LC_NAME, LC_NUMERIC等<br>
+locale keys: name_fmt, decimal_point, thousands_seperator等<br>
 ```shell
 locale # 查看所有locale categores和LC_ALL, LANG, LANGUAGE
 # locale -k [category|key]
+locale -ck decimal_point
 locale -k LC_NAME
-locale -k name_fmt
+locale -ck name_fmt
 ```
 1. LC_ALL一般不设置, 用于在命令行中临时设置控制程序行为, 比如用于使用原生C类型排序时, `LC_ALL=C sort file.txt`
 2. env环境变量中都是有值的键值对, LC_\*, LANGUAGE, LANG如果没有被设置, env没有相应的变量；尽管使用`locale`命令都会显示出来, 特别是LC_*(LC_ALL除外), 有个规则
@@ -964,27 +994,75 @@ hkdf_label = pack(">H", length) \
           + pack("B", len(context)) + context
 print(hkdf_label)
 ```
+
 ### octet VS octal
 - octet: 就是一个字节的意思, 因为byte在某些场景不一定指定8位一组, 有些场景引起混淆的地方就使用octet更严谨, 比如[TLS1.3 RFC](https://datatracker.ietf.org/doc/html/rfc8446)
 - octal: 代表八进制
+
 ### hexdump, xxd
 1. KB and K(KiB)  
 hexdump可以使用K或者KiB代表1024字节, KB代表1000字节
 2. Format and Color in HEXDUMP
+format string格式: `-e 'iterator_count/byte_count "format"'`, 其中iterator_count, byte_count其中只要有一个存在，那 `/` 是必须的。`format` 必须使用双引号, `format`以`%`开头，类似`printf`。常见的`format`有:<br>
+`_a` 每次开始递归迭代时执行，比如 `-e '"%08.8_ax"'` <br>
+`_A` 所有迭代完成后执行，一般最后输出所有长度, 比如: `-e '"%08.8_Ax"'` <br>
+`_p` 按照当前字符集输出字符，不能打印使用`.`代替<br>
+`_L` 添加颜色<br>
+`x`  16进制转化
+
 ```shell
-hexdump -e '"%08_Ax_L[cyan]\n"' -e '"%08_ax_L[cyan]  " 8/2 "%04x_L[green:0x6f72@0-1,!red:0x6f72@0-1] " "  |"' -e '16/1 "%_p" "|" "\n"' -n 64 /etc/passwd
+# 执行完所有转换添加cyan颜色的地址标识, 然后换行;
+# 每次开始递归迭代时添加cyan颜色的起始地址标识, 空格两个
+# 每次迭代八次，每次取两个字节，如果开头两个字节是0x6f72则使用绿色显示，否则使用红色, 其他使用默认颜色
+# 每次迭代十六次, 使用默认字符集显示对应字节的字符, 并且前后使用 "|" 分割，最后换行
+hexdump -v -e '"%08_Ax_L[cyan]\n"' -e '"%08_ax_L[cyan]  " 8/2 "%04x_L[green:0x6f72@0-1,!red:0x6f72@0-1] " "  |"' -e '16/1 "%_p" "|" "\n"' -n 64 /etc/passwd
+# -v 不省略重复字节，默认会使用 * 省略重复字节
+# -e 提供format, 可以有多个，多个的递归迭代从当前开头开始
+# -f 提供format文件
+# -n 使用前64个字节
 ```
 3. xxd和hexdump分场景使用, hexdump支持定制, 功能更丰富, 但是简单场景xxd似乎更适合点 :)
 ```shell
-echo -en "tls13 $label" | hexdump -v -e '/1 %02x'
+echo -en "tls13 $label" | hexdump -v -e '/1 "%02x"'
 echo -en "tls13 $label" | xxd -p
 ```
-### [fprintf format string](https://cplusplus.com/reference/cstdio/fprintf/)
-```
-%[flags][width][.precision][length]specifier
-flags: + - 0 #(0x, 0前缀)
 
-printf "%08.3x" 7  -> _____007
+### [fprintf format string](https://cplusplus.com/reference/cstdio/fprintf/)
+Format String: `%[flags][minimum_field_width][.precision][length_modifier]conversion_specifier`<br>
+不想写解释了，直接看`man 3 printf`, 里面描述的很清晰
+```shell
+# # 标识添加各进制的前缀，比如十六进制的0x等
+# 0 padding zero
+# - left justiment, 默认右对齐
+# + 显式现实正负号
+# ' 现实thousands separator, BASH的printf支持，GCC版本貌似不支持
+flags: [+-0#']
+
+# Minimum Field Width 
+标识整个字段的最小宽度，如果超过，不会截断
+
+# Precision 
+对于d, i, o, u, x, X的conversion specifier, 表示最小出现的数字个数; 而对于a, A, f, F, e, E, 表示小数点后数字个数; 对于g, G, 表示最大有效位数; 对于s, S, 表示最大现实字符个数
+
+# minimum_field_width和precision可以使用后面的argument参数作为值, 使用 '*' 标识, 比如 
+int width = 3;
+int num = 2;
+printf("%*d\n", width, num);
+printf("%2$%*1$d\n");
+# 打印出 __2
+# 以上两种方式一样，第一种使用*占位一个参数作为minimum_field_width, 第二种更加隐晦, 她使用 '$m$' 格式引用后面的参数，然后使用这种形式引用第一个参数作为minimum_field_width。
+
+# Length Modifier
+A length modifier is used to exactly specify the type of the matching argument.
+在printf中一般不使用，标识被匹配参数的类型或者叫做长度, 比如
+printf("%hhd\n", 257)
+打印 1, 因为 'hh' 表示后面的参数是一个字节，最大0xff, 超过就wrap
+
+# Conversion Specifier
+d, i, u, x, X, o, O, f, F, e, E, g, G, c, s, % etc
+
+# 当conversion specifier为x时，有pricision场景，flag 0省略, 所以前面5位空格
+printf "%08.3x" 7  -> _____007 
 printf "%-08.3x" 7 -> 007_____
 
 flags: 0 表示不足长度8使用0填充
@@ -992,6 +1070,7 @@ width: 8 表示最长长度为8
 precision: 3 使用x时, precision表示最短长度
 specifier: x 表示使用16进制表示
 ```
+
 ## 2023-09-14
 ### [Sock5协议](https://datatracker.ietf.org/doc/html/rfc1928)
 1. [支持IPv6 and IPv4 dual stack](https://stackoverflow.com/questions/1618240/how-to-support-both-ipv4-and-ipv6-connections)

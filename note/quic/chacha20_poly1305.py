@@ -3,10 +3,13 @@
 # 但是不能指定counter
 # pyCryptography 不遵循RFC 8439
 
+# 运行
 # python3 -m pip install pycryptodom
+# python3 chacha20_poly1305.py
+
+from binascii import hexlify
 
 from Crypto.Cipher import ChaCha20, ChaCha20_Poly1305
-from binascii import hexlify
 
 # https://www.pycryptodome.org/src/cipher/chacha20
 # PyCryptodome ChaCha20
