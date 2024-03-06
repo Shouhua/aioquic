@@ -195,6 +195,7 @@ def hkdf_extract(
     h.update(key_material)
     return h.finalize()
 
+
 # https://cryptography.io/en/latest/hazmat/primitives/asymmetric/serialization/
 # 非对称密钥有多种格式，比如pem, der, openssh等
 def load_pem_private_key(
@@ -322,11 +323,12 @@ class ExtensionType(IntEnum):
 
 
 class Group(IntEnum):
-    # NIST P-256
+    # ECDSA使用的曲线
     SECP256R1 = 0x0017
     SECP384R1 = 0x0018
     SECP521R1 = 0x0019
-    # EdDSA使用的椭圆曲线
+    # Edwards Curves Key Exchange Algorithm
+    # 使用Curve2519的DH密钥交换算法
     X25519 = 0x001D
     X448 = 0x001E
     GREASE = 0xAAAA
@@ -358,11 +360,13 @@ class PskKeyExchangeMode(IntEnum):
 
 
 class SignatureAlgorithm(IntEnum):
+    # NIST P-256和SECP256R1不同的组织的名字，表示一样的曲线
+    # https://datatracker.ietf.org/doc/html/rfc4492#appendix-A
     ECDSA_SECP256R1_SHA256 = 0x0403
     ECDSA_SECP384R1_SHA384 = 0x0503
     ECDSA_SECP521R1_SHA512 = 0x0603
-    # EdDSA自己内部集成了hash，这个在DSA中need notable
-    # Demystifying cryptography with openssl 3.0(page 135)
+    # EdDSA不需要hash算法(pure EdDSA)，自己内部集成了hash，这个在DSA中need notable(Demystifying cryptography with openssl 3.0(page 135))
+    # 基于Curve25519曲线的签名算法EdDSA(名字不同于X25519，用于密钥交换)
     ED25519 = 0x0807
     ED448 = 0x0808
     # RSA使用PKCS1标准的padding
@@ -478,8 +482,8 @@ def push_extension(buf: Buffer, extension_type: int) -> Generator:
 # 00 13 - 主机名列表的长度为 0x13(19) 字节
 # 65 78 61 ... 6e 65 74 - 主机名："example.ulfheim.net"
 def pull_server_name(buf: Buffer) -> str:
-    with pull_block(buf, 2): # 上面的 00 16
-        name_type = buf.pull_uint8() # 00 表示主机名
+    with pull_block(buf, 2):  # 上面的 00 16
+        name_type = buf.pull_uint8()  # 00 表示主机名
         if name_type != NameType.HOST_NAME:
             # We don't know this name_type.
             raise AlertIllegalParameter(
@@ -498,6 +502,7 @@ def push_server_name(buf: Buffer, server_name: str) -> None:
 
 
 KeyShareEntry = Tuple[int, bytes]
+
 
 # 00 33 - 表示这是 "算法公钥列表" 扩展
 # 00 26 - 扩展信息长度为 0x26(38) 字节
@@ -543,18 +548,19 @@ class OfferedPsks:
     identities: List[PskIdentity]
     binders: List[bytes]
 
+
 # struct {
 #           opaque identity<1..2^16-1>;
 #           uint32 obfuscated_ticket_age;
 #       } PskIdentity;
-# 
+#
 #       opaque PskBinderEntry<32..255>;
-# 
+#
 #       struct {
 #           PskIdentity identities<7..2^16-1>;
 #           PskBinderEntry binders<33..2^16-1>;
 #       } OfferedPsks;
-# 
+#
 #       struct {
 #           select (Handshake.msg_type) {
 #               case client_hello: OfferedPsks;
@@ -1224,6 +1230,7 @@ def signature_algorithm_params(signature_algorithm: int) -> Tuple:
     if signature_algorithm in (SignatureAlgorithm.ED25519, SignatureAlgorithm.ED448):
         return tuple()
 
+    # 获取签名算法对应的padding类型和hash算法
     padding_cls, algorithm_cls = SIGNATURE_ALGORITHMS[signature_algorithm]
     algorithm = algorithm_cls()
     if padding_cls is None:

@@ -1,3 +1,111 @@
+## 2024-03-06
+1. /usr/lib/locale/C.utf8/
+包含默认的各种locale category
+
+2. /usr/share/locale/
+包含各种安装的locale, LC_COLLATE不在上面文件夹中, glib直接处理
+
+3. ssh配置中可以传递locale相关环境变量(LANG LC_*), 具体参见参数SendEnv, 还可以传递其他全局环境变量, 但是两者均需要服务端支持, 服务端配置参数AcceptEnv
+
+4. 如果命令中遇到文件不存在等, 可以直接使用strace跟踪看看到底是哪些文件找不到, 比如locale报错, 提示
+`warning: setlocale: LC_CTYPE: cannot change locale (UTF-8): No such file or directory`, 可以使用如下命令查询:
+```shell
+strace locale 2&>1 | grep ENOENT
+sudo strace -eopen locale-gen &> output
+```
+
+## 2024-03-05
+### OpenSSL3.0引入OSSL_PARAM辅助函数, 比如OSSL_PARAM_utf8_string("bar", bar, sizeof(bar))等
+```c
+include <openssl/params.h>
+// https://www.openssl.org/docs/manmaster/man3/OSSL_PARAM_construct_utf8_string.html
+```
+
+### Demystifying Cryptography with OpenSSL 3.0 第六章 Asymmetric Encryption and Decryption
+非对称加密算法可用于加密和签名, OpenSSL中只有RSA算法用于直接加密, 其他需要通过session key(对称密钥)加解密
+对称密钥只是字节, 没有格式意义; 非对称密钥一般使用格式化的密钥, 比如RSA有素数等, RSA至少2048bits才安全
+`ECC` - `Elliptic Curve Cryptography`
+
+#### 密钥文件格式
+非对称密钥和公钥称为keypair, keypair文件格式有PEM(Privacy Enhanced Mail)和DER(Distinguished Encoding Rules), OpenSSL默认使用PEM存储keys和certificates。
+PEM和DER关系
+PEM format is really a Base64 wrapping around some binary data,
+with a text header (the BEGIN line) and a text footer (the END line). If you remove the header and the
+footer from the keypair PEM file and Base64-decode it, you will get the keypair in the Distinguished
+Encoding Rules (DER) format
+
+#### RSA padding 
+PKCS#1 v2.0 OAEP(Optimal Asymmetric Encryption Padding) padding type, **-pkeyopt rsa_padding_mode:oaep**
+```shell
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out rsa_key.pem
+openssl pkey -in rsa_key.pem -noout -text # 查看公私钥信息
+openssl pkey -in rsa_key.pem -pubout -out rsa_public_key.pem #  到处公钥, 用于后面加密session key, 后者是真正用于加解密的key
+openssl rand -out session_key.bin 32 # 生成session key
+openssl pkeyutl -encrypt -in session_key.bin -out session_key.bin.encrypted -pubin -inkey rsa_public_key.pem -pkeyopt rsa_padding_mode:oaep
+```
+
+#### Session key
+**RSA输出密文跟key长度一致**, 比如2048等(这也是其他非对称算法优势), 除去padding, 最大可以加密长度比如：key_size - 42 = 4096 - 42 = 4054,所以需要使用对称session key加密很长的plaintext
+
+#### OpenSSL error handle
+1. 每个线程有自己的OpenSSL error queue, 用户不需要初始化和释放
+2. error queue主要用于 `asymmetric cryptography`, `X.509 certificates`和`TLS`, 但是`symmetric cryptgraphy`, `HMAC`等没有使用, 有可能泄露关键信息
+```c
+// Get the code of the earliest error in the queue and remove that error from the queue
+ERR_get_error() 
+ERR_peek_error()
+ERR_GET_LIB()
+ERR_GET_REASON()
+ERR_error_string_n()
+
+// Clear the queue and remove all the errors from it
+ERR_clear_error() 
+
+// Print the error queue to FILE stream and clear the queue , 这个函数有可能报错, 比如磁盘满了等. 这个函数很适合debug。k
+ERR_print_errors_fp() 
+if (ERR_peek_error()) {
+     exit_code = 1;
+     if (error_stream) {
+          fprintf(error_stream, "Errors from the OpenSSL error queue:\n"); 
+          ERR_print_errors_fp(error_stream);
+     }
+}
+```
+**注意, OpenSSL返回的code跟error queue中的code是不一样的**
+
+### Demystifying Cryptography with OpenSSL 3.0 第七章 Digital Signatures and Their Verification
+签名一般是用hash算法比如SHA256缩短plaintext长度, 然后使用非对称算法对hash值签名, 即为hash and sign
+一个例外是EdDSA(pureEdDSA), 信息一次性全部作为输入, 其内部会对内容做hash处理, 见[例子](./openssl/ed25519.c)
+
+#### ECDSA 
+ECC(Elliptic Curve Cryptography) based signature, OpenSSL ECDSA支持两种椭圆曲线, `NIST curves`和`Brainpool curves`
+其中NIST曲线有`P-256 curve`和`P-224 curve`, 非常快, 不同组织曲线名称有可能不一样, 见https://datatracker.ietf.org/doc/html/rfc4492#appendix-A
+ECDSA需要非常好的随机数生成器, 已有一个版本使用hash of private key替代随机数
+
+#### EdDSA
+EC(Edwards Curve)-based signature algorithm, EdDSA不需要随机数, 没有泄露私钥风险, 支持两种曲线: `Curve25519`, `Curve448`。`Curve25519`表示曲线, **`Ed25519`表示使用Curve25519的EdDSA签名算法**, **`X25519`表示使用`Curve25519`的DH密钥交换算法**。<br>
+OpenSSL中生成keypair时, 会有ED25519和X25519的区别, 前者用于签名, 后者用于key exchange, 混用会报错。
+```shell
+openssl genkey -algorithm ED25519 -out ed25519.pem
+openssl genkey -algorithm X25519 -out ed25519.pem
+```
+
+https://datatracker.ietf.org/doc/html/rfc8446#section-4.2.7
+Key Exchange使用DH方式有两种：基于椭圆曲线(ECDHE), 基于有限域(DHE)
+ECDHE(Elliptic Curve Diffie-Hellman Ephemeral) 包括SECP256r1, x25519等
+
+#### OpenSSL命令
+1. 以下命令, ED25519不需要指定曲线, 签名时也不需要指定MD方法, 指定会报错
+2. 同样如果生成X25519的keypair, 签名时报错
+
+```shell
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:secp521r1 -out secp512.key
+openssl pkeyutl -sign -digest sha3-512 -inkey secp512.key -in somefile.txt -rawin -out somefile.txt.sign
+
+openssl genpkey -algorithm ED25519 -out 25519.key
+openssl pkeyutl -sign -inkey 25519.key -in somefile.txt -rawin -out somefile.txt.sign
+```
+
 ## 2024-03-01
 ### 十六进制转化成字符串, 使用sscanf或者使用OPENSSL_hexstr2buf
 #### sscanf的[format格式介绍](https://docwiki.embarcadero.com/RADStudio/Alexandria/en/Scanf_Format_Specifiers)<br>
@@ -12,7 +120,7 @@ https://www.eskimo.com/~scs/cclass/int/sx2f.html<br>
 
 #### sscanf返回值
 正常情况成功返回成功匹配和赋值的个数。
-如果部分成功匹配和赋值，返回成功的个数; 如果input结束(EOF)时，没有匹配成功或者匹配失败，返回EOF, 使用errno查看。
+如果部分成功匹配和赋值, 返回成功的个数; 如果input结束(EOF)时, 没有匹配成功或者匹配失败, 返回EOF, 使用errno查看。
 ```c
 // https://wpollock.com/CPlus/PrintfRef.htm#printfLen
 char buf[BUFSIZ], junk[BUFSIZ];
@@ -58,23 +166,23 @@ __owur int EVP_CipherUpdate(EVP_CIPHER_CTX *ctx, unsigned char *out,
 /*__owur*/ int EVP_EncryptUpdate(EVP_CIPHER_CTX *ctx, unsigned char *out,
                                  int *outl, const unsigned char *in, int inl);
 ```
-1. 必须先加入AAD(Additional Authenticated Data或者叫associated data)数据，这是需要设置out为NULL
-2. 然后加入需要加密数据，加入解密数据后，不能再加入ADD数据
+1. 必须先加入AAD(Additional Authenticated Data或者叫associated data)数据, 这是需要设置out为NULL
+2. 然后加入需要加密数据, 加入解密数据后, 不能再加入ADD数据
 
 ### [ChaCha20-Poly1305](https://en.wikipedia.org/wiki/ChaCha20-Poly1305)
-ChaCha20-Poly1305 类似AES-128-GCM，也是一种AEAD类型算法, ChaCha20是流式对称加密算法，Poly1305是MAC算法(Message Authentication Code)。
+ChaCha20-Poly1305 类似AES-128-GCM, 也是一种AEAD类型算法, ChaCha20是流式对称加密算法, Poly1305是MAC算法(Message Authentication Code)。
 这个算法也加入[IETF协议规范](https://datatracker.ietf.org/doc/html/rfc8439)
-1. ChaCha20可以使用128位或者256位的key，但是在OpenSSL中仅支持256位的key。
-2. OpenSSL中ChaCha20算法使用256位key和128位的IV(32bits counter+96bits nonce)。OpenSSL中默认IV是96bits(12bytes)，所以使用ChaCha20时，需要显式设置下IV长度, 但是ChaCha20-Poly1306使用256bits的key和96bits的IV。
+1. ChaCha20可以使用128位或者256位的key, 但是在OpenSSL中仅支持256位的key。
+2. OpenSSL中ChaCha20算法使用256位key和128位的IV(32bits counter+96bits nonce)。OpenSSL中默认IV是96bits(12bytes), 所以使用ChaCha20时, 需要显式设置下IV长度, 但是ChaCha20-Poly1306使用256bits的key和96bits的IV。
 ```c
 /* https://stackoverflow.com/questions/75007626/openssl-3-not-verifying-using-tag-using-chacha20-poly1305
 ** https://www.openssl.org/docs/man3.1/man3/EVP_chacha20_poly1305.html
 */
 EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, 16, NULL)
 ```
-3. ChaCha20使用block counter，并且block count大小是32位，在256G以内被认为是安全的，一般网络数据够用，如果超过可以分开重置参数后在加密
+3. ChaCha20使用block counter, 并且block count大小是32位, 在256G以内被认为是安全的, 一般网络数据够用, 如果超过可以分开重置参数后在加密
 
-4. python密码库有多个，比较常用的有[pycryptography](https://cryptography.io/en/latest/), [pycryptodome](https://www.pycryptodome.org/), 其中pycrypto库不再维护了，作者推荐使用前两个库替换，其中 `pycryptodome` 的API是兼容的。两者都支持 `ChaCha20`和 `ChaCha20-Poly1305` , 但是前者不兼容RFC 8439，后者兼容，但是不支持自定义counter。其中的代码解释见[chacha20_poly1305.py](./quic/chacha20_poly1305.py) 和 [chacha20.c](./quic/chacha20.c) 以及 [chacha20_poly1305.c](./quic/chacha20_poly1305.c) 。
+4. python密码库有多个, 比较常用的有[pycryptography](https://cryptography.io/en/latest/), [pycryptodome](https://www.pycryptodome.org/), 其中pycrypto库不再维护了, 作者推荐使用前两个库替换, 其中 `pycryptodome` 的API是兼容的。两者都支持 `ChaCha20`和 `ChaCha20-Poly1305` , 但是前者不兼容RFC 8439, 后者兼容, 但是不支持自定义counter。其中的代码解释见[chacha20_poly1305.py](./quic/chacha20_poly1305.py) 和 [chacha20.c](./quic/chacha20.c) 以及 [chacha20_poly1305.c](./quic/chacha20_poly1305.c) 。
 
 ## 2024-02-29
 ### pigz
@@ -82,9 +190,9 @@ EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_AEAD_SET_IVLEN, 16, NULL)
 ```shell
 pigz -k -z -c -f raw.txt | xxd -ps | tail --bytes=+5 | head --bytes=-9
 ```
-**BASH中凡是字符跟字节关系的，想到hexdump, xxd或者od**
+**BASH中凡是字符跟字节关系的, 想到hexdump, xxd或者od**
 
-2. 在[zlib.c](./zlib/zlib.c)使用deflateInit2代替deflateInit，设置`windowBits`参数为负数可以输出原始DEFLATE算法的数据
+2. 在[zlib.c](./zlib/zlib.c)使用deflateInit2代替deflateInit, 设置`windowBits`参数为负数可以输出原始DEFLATE算法的数据
 
 ## 2024-02-26
 ### [zlib](https://www.zlib.net/)
@@ -141,7 +249,7 @@ xxd -ps compress.bin
 # zlib或者defalte格式压缩数据
 # 789ccb48cdc9c9d729cf2fca4951e4020023710494
 
-# 在zlib.c使用deflateInit2代替deflateInit，可以输出原始DEFLATE算法的数据
+# 在zlib.c使用deflateInit2代替deflateInit, 可以输出原始DEFLATE算法的数据
 ```
 
 JS语言参考[zlib.js](./zlib/zlib.js)文件
@@ -166,7 +274,7 @@ cb 48 cd c9 c9 d7 29 cf 2f ca 49 51 e4 02 00 23 71 04 94 (压缩数据, 包括�
 
 ### zlib格式标准 [RFC 1950](https://datatracker.ietf.org/doc/html/rfc1950)
 通常两个字节头部(可以存在扩展字段)和四个字节adler32原始数据校验值
-1. 两个字节头部：[CMF，FLG](https://stackoverflow.com/questions/9050260/what-does-a-zlib-header-look-like)
+1. 两个字节头部：[CMF, FLG](https://stackoverflow.com/questions/9050260/what-does-a-zlib-header-look-like)
 ```
 # 常用值
 78 01 - No Compression/low
@@ -184,13 +292,13 @@ bits 6 to 7  FLEVEL  (compression level), 2代表default compression algorithm
 ```
 
 ### gzip格式标准 [RFC 1952](https://datatracker.ietf.org/doc/html/rfc1952)
-通常十个字节头部和八个字节尾部，包括四字节CRC32原始数据校验值和四字节原始数据长度
+通常十个字节头部和八个字节尾部, 包括四字节CRC32原始数据校验值和四字节原始数据长度
 1. 十字节头部
 ```
 ID1|ID2|CM |FLG|     MTIME     |XFL|OS 
-ID1(0x1f), ID2(0x8b) 为gzip的magic number，标识为gzip格式
+ID1(0x1f), ID2(0x8b) 为gzip的magic number, 标识为gzip格式
 CM Compress Method, 8代表DEFLATE
-FLG, 不描述，见文档
+FLG, 不描述, 见文档
      bit 0   FTEXT
      bit 1   FHCRC
      bit 2   FEXTRA
@@ -199,8 +307,8 @@ FLG, 不描述，见文档
      bit 5   reserved
      bit 6   reserved
      bit 7   reserved
-MTIME The most recent Modification Time of original file, 如果是字节流，则为当前时间戳
-XFL eXtra Flags, 2为最大压缩，4为最快速度
+MTIME The most recent Modification Time of original file, 如果是字节流, 则为当前时间戳
+XFL eXtra Flags, 2为最大压缩, 4为最快速度
 OS Operation System, 3为Unix, 255为unknown
 ```
 
@@ -1003,21 +1111,21 @@ print(hkdf_label)
 1. KB and K(KiB)  
 hexdump可以使用K或者KiB代表1024字节, KB代表1000字节
 2. Format and Color in HEXDUMP
-format string格式: `-e 'iterator_count/byte_count "format"'`, 其中iterator_count, byte_count其中只要有一个存在，那 `/` 是必须的。`format` 必须使用双引号, `format`以`%`开头，类似`printf`。常见的`format`有:<br>
-`_a` 每次开始递归迭代时执行，比如 `-e '"%08.8_ax"'` <br>
-`_A` 所有迭代完成后执行，一般最后输出所有长度, 比如: `-e '"%08.8_Ax"'` <br>
-`_p` 按照当前字符集输出字符，不能打印使用`.`代替<br>
+format string格式: `-e 'iterator_count/byte_count "format"'`, 其中iterator_count, byte_count其中只要有一个存在, 那 `/` 是必须的。`format` 必须使用双引号, `format`以`%`开头, 类似`printf`。常见的`format`有:<br>
+`_a` 每次开始递归迭代时执行, 比如 `-e '"%08.8_ax"'` <br>
+`_A` 所有迭代完成后执行, 一般最后输出所有长度, 比如: `-e '"%08.8_Ax"'` <br>
+`_p` 按照当前字符集输出字符, 不能打印使用`.`代替<br>
 `_L` 添加颜色<br>
 `x`  16进制转化
 
 ```shell
 # 执行完所有转换添加cyan颜色的地址标识, 然后换行;
 # 每次开始递归迭代时添加cyan颜色的起始地址标识, 空格两个
-# 每次迭代八次，每次取两个字节，如果开头两个字节是0x6f72则使用绿色显示，否则使用红色, 其他使用默认颜色
-# 每次迭代十六次, 使用默认字符集显示对应字节的字符, 并且前后使用 "|" 分割，最后换行
+# 每次迭代八次, 每次取两个字节, 如果开头两个字节是0x6f72则使用绿色显示, 否则使用红色, 其他使用默认颜色
+# 每次迭代十六次, 使用默认字符集显示对应字节的字符, 并且前后使用 "|" 分割, 最后换行
 hexdump -v -e '"%08_Ax_L[cyan]\n"' -e '"%08_ax_L[cyan]  " 8/2 "%04x_L[green:0x6f72@0-1,!red:0x6f72@0-1] " "  |"' -e '16/1 "%_p" "|" "\n"' -n 64 /etc/passwd
-# -v 不省略重复字节，默认会使用 * 省略重复字节
-# -e 提供format, 可以有多个，多个的递归迭代从当前开头开始
+# -v 不省略重复字节, 默认会使用 * 省略重复字节
+# -e 提供format, 可以有多个, 多个的递归迭代从当前开头开始
 # -f 提供format文件
 # -n 使用前64个字节
 ```
@@ -1029,17 +1137,17 @@ echo -en "tls13 $label" | xxd -p
 
 ### [fprintf format string](https://cplusplus.com/reference/cstdio/fprintf/)
 Format String: `%[flags][minimum_field_width][.precision][length_modifier]conversion_specifier`<br>
-不想写解释了，直接看`man 3 printf`, 里面描述的很清晰
+不想写解释了, 直接看`man 3 printf`, 里面描述的很清晰
 ```shell
-# # 标识添加各进制的前缀，比如十六进制的0x等
+# # 标识添加各进制的前缀, 比如十六进制的0x等
 # 0 padding zero
 # - left justiment, 默认右对齐
-# + 显式现实正负号
-# ' 现实thousands separator, BASH的printf支持，GCC版本貌似不支持
+# + 显式显示正负号
+# ' 显示thousands separator, BASH的printf支持, GCC版本貌似不支持
 flags: [+-0#']
 
 # Minimum Field Width 
-标识整个字段的最小宽度，如果超过，不会截断
+标识整个字段的最小宽度, 如果超过, 不会截断
 
 # Precision 
 对于d, i, o, u, x, X的conversion specifier, 表示最小出现的数字个数; 而对于a, A, f, F, e, E, 表示小数点后数字个数; 对于g, G, 表示最大有效位数; 对于s, S, 表示最大现实字符个数
@@ -1050,18 +1158,18 @@ int num = 2;
 printf("%*d\n", width, num);
 printf("%2$%*1$d\n");
 # 打印出 __2
-# 以上两种方式一样，第一种使用*占位一个参数作为minimum_field_width, 第二种更加隐晦, 她使用 '$m$' 格式引用后面的参数，然后使用这种形式引用第一个参数作为minimum_field_width。
+# 以上两种方式一样, 第一种使用*占位一个参数作为minimum_field_width, 第二种更加隐晦, 她使用 '$m$' 格式引用后面的参数, 然后使用这种形式引用第一个参数作为minimum_field_width。
 
 # Length Modifier
 A length modifier is used to exactly specify the type of the matching argument.
-在printf中一般不使用，标识被匹配参数的类型或者叫做长度, 比如
+在printf中一般不使用, 标识被匹配参数的类型或者叫做长度, 比如
 printf("%hhd\n", 257)
-打印 1, 因为 'hh' 表示后面的参数是一个字节，最大0xff, 超过就wrap
+打印 1, 因为 'hh' 表示后面的参数是一个字节, 最大0xff, 超过就wrap
 
 # Conversion Specifier
 d, i, u, x, X, o, O, f, F, e, E, g, G, c, s, % etc
 
-# 当conversion specifier为x时，有pricision场景，flag 0省略, 所以前面5位空格
+# 当conversion specifier为x时, 有pricision场景, flag 0省略, 所以前面5位空格
 printf "%08.3x" 7  -> _____007 
 printf "%-08.3x" 7 -> 007_____
 
@@ -1114,7 +1222,7 @@ nc -v -4 -t localhost 1081
 1. encryption key和password区别
 Encryption key用于对称加密算法中, 一般来说, 需要固定长度位数, 可读性差; password则相反
 2. KDF takes the following parameters
-IKM(Input Key Material), Salt, Info(Application-specific information), PRF(Pseudorandom Function), Function-specific params(interation count or others(scrypt使用参数)), OKM(Output Key Material) length
+IKM(Input Key Material), Salt, Info(Application-specific information), PRF(Pseudorandom Function), Function-specific params(interation count or others(scrypt使用参数, N=65535, r=8, p=1)), OKM(Output Key Material) length
 ### Asymmetric Encryption and Decryption
 1. a private key and a public key form a **keypair**
 2. Man in the Middle attac(中间人攻击), 提起非对称加密就要提及中间人攻击, 密钥运送问题
