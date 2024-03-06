@@ -174,7 +174,8 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
     ) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         adapter = QuicStreamAdapter(self, stream_id)
         reader = asyncio.StreamReader()
-        writer = asyncio.StreamWriter(adapter, None, reader, self._loop)
+        protocol = asyncio.streams.StreamReaderProtocol(reader)
+        writer = asyncio.StreamWriter(adapter, protocol, reader, self._loop)
         self._stream_readers[stream_id] = reader
         return reader, writer
 
@@ -230,6 +231,7 @@ class QuicStreamAdapter(asyncio.Transport):
     def __init__(self, protocol: QuicConnectionProtocol, stream_id: int):
         self.protocol = protocol
         self.stream_id = stream_id
+        self._closing = False
 
     def can_write_eof(self) -> bool:
         return True
@@ -246,5 +248,14 @@ class QuicStreamAdapter(asyncio.Transport):
         self.protocol._transmit_soon()
 
     def write_eof(self):
+        if self._closing:
+            return
+        self._closing = True
         self.protocol._quic.send_stream_data(self.stream_id, b"", end_stream=True)
         self.protocol._transmit_soon()
+
+    def close(self):
+        self.write_eof()
+
+    def is_closing(self) -> bool:
+        return self._closing

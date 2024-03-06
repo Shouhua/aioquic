@@ -353,7 +353,7 @@ class QuicConnection:
         self._remote_ack_delay_exponent = 3
         self._remote_active_connection_id_limit = 2
         self._remote_initial_source_connection_id: Optional[bytes] = None
-        self._remote_max_idle_timeout = 0.0  # seconds
+        self._remote_max_idle_timeout: Optional[float] = None  # seconds
         self._remote_max_data = 0
         self._remote_max_data_used = 0
         self._remote_max_datagram_frame_size: Optional[int] = None
@@ -372,6 +372,7 @@ class QuicConnection:
         self._spin_highest_pn = 0
         self._state = QuicConnectionState.FIRSTFLIGHT
         self._streams: Dict[int, QuicStream] = {}
+        self._streams_queue: List[QuicStream] = []
         self._streams_blocked_bidi: List[QuicStream] = []
         self._streams_blocked_uni: List[QuicStream] = []
         self._streams_finished: Set[int] = set()
@@ -733,6 +734,17 @@ class QuicConnection:
         except IndexError:
             return None
 
+    def _idle_timeout(self) -> float:
+        # RFC 9000 section 10.1
+
+        # Start with our local timeout.
+        idle_timeout = self._configuration.idle_timeout
+        if self._remote_max_idle_timeout is not None:
+            # Our peer has a preference too, so pick the smaller timeout.
+            idle_timeout = min(idle_timeout, self._remote_max_idle_timeout)
+        # But not too small!
+        return max(idle_timeout, 3 * self._loss.get_probe_timeout())
+
     def receive_datagram(self, data: bytes, addr: NetworkAddress, now: float) -> None:
         """
         Handle an incoming datagram.
@@ -766,7 +778,7 @@ class QuicConnection:
 
         # for servers, arm the idle timeout on the first datagram
         if self._close_at is None:
-            self._close_at = now + self._configuration.idle_timeout
+            self._close_at = now + self._idle_timeout()
 
         buf = Buffer(data=data)
         while not buf.eof():
@@ -1073,19 +1085,7 @@ class QuicConnection:
                 return
 
             # update idle timeout
-            idle_timeout = self._configuration.idle_timeout
-            if (
-                self._remote_max_idle_timeout != 0
-                and self._remote_max_idle_timeout < self._configuration.idle_timeout
-            ):
-                idle_timeout = self._remote_max_idle_timeout
-            self._logger.info(
-                f"calccccccccccccccccc idle_timeout: {idle_timeout}, {self._remote_max_idle_timeout}, {self._configuration.idle_timeout}"
-            )
-
-            self._close_at = now + idle_timeout
-
-            # self._close_at = now + self._configuration.idle_timeout
+            self._close_at = now + self._idle_timeout()
 
             # handle migration
             if (
@@ -1290,7 +1290,7 @@ class QuicConnection:
                 data={"client_alpns": self._configuration.alpn_protocols},
             )
 
-        self._close_at = now + self._configuration.idle_timeout
+        self._close_at = now + self._idle_timeout()
         self._initialize(self._peer_cid.cid)
 
         self.tls.handle_message(b"", self._crypto_buffers)
@@ -1364,6 +1364,7 @@ class QuicConnection:
                 # 收到对端数据时，如果是单向stream，本端肯定不能写
                 writable=not stream_is_unidirectional(stream_id),
             )
+            self._streams_queue.append(stream)
         return stream
 
     def _get_or_create_stream_for_send(self, stream_id: int) -> QuicStream:
@@ -1401,6 +1402,7 @@ class QuicConnection:
                 max_stream_data_remote=max_stream_data_remote,
                 readable=not is_unidirectional,
             )
+            self._streams_queue.append(stream)
             if is_unidirectional:
                 self._local_next_stream_id_uni = stream_id + 4
             else:
@@ -2869,34 +2871,54 @@ class QuicConnection:
                 except QuicPacketBuilderStop:
                     break
 
-            for stream in list(self._streams.values()):
-                # if the stream is finished, discard it
-                if stream.is_finished:
-                    self._logger.debug("Stream %d discarded", stream.stream_id)
-                    self._streams.pop(stream.stream_id)
-                    self._streams_finished.add(stream.stream_id)
-                    continue
+            sent: Set[QuicStream] = set()
+            discarded: Set[QuicStream] = set()
+            try:
+                for stream in self._streams_queue:
+                    # if the stream is finished, discard it
+                    if stream.is_finished:
+                        self._logger.debug("Stream %d discarded", stream.stream_id)
+                        self._streams.pop(stream.stream_id)
+                        self._streams_finished.add(stream.stream_id)
+                        discarded.add(stream)
+                        continue
 
-                if stream.receiver.stop_pending:
-                    # STOP_SENDING
-                    self._write_stop_sending_frame(builder=builder, stream=stream)
+                    if stream.receiver.stop_pending:
+                        # STOP_SENDING
+                        self._write_stop_sending_frame(builder=builder, stream=stream)
 
-                if stream.sender.reset_pending:
-                    # RESET_STREAM
-                    self._write_reset_stream_frame(builder=builder, stream=stream)
-                elif not stream.is_blocked and not stream.sender.buffer_is_empty:
-                    # STREAM
-                    self._remote_max_data_used += self._write_stream_frame(
-                        builder=builder,
-                        space=space,
-                        stream=stream,
-                        max_offset=min(
-                            stream.sender.highest_offset
-                            + self._remote_max_data
-                            - self._remote_max_data_used,
-                            stream.max_stream_data_remote,
-                        ),
-                    )
+                    if stream.sender.reset_pending:
+                        # RESET_STREAM
+                        self._write_reset_stream_frame(builder=builder, stream=stream)
+                    elif not stream.is_blocked and not stream.sender.buffer_is_empty:
+                        # STREAM
+                        used = self._write_stream_frame(
+                            builder=builder,
+                            space=space,
+                            stream=stream,
+                            max_offset=min(
+                                stream.sender.highest_offset
+                                + self._remote_max_data
+                                - self._remote_max_data_used,
+                                stream.max_stream_data_remote,
+                            ),
+                        )
+                        self._remote_max_data_used += used
+                        if used > 0:
+                            sent.add(stream)
+
+            finally:
+                # Make a new stream service order, putting served ones at the end.
+                #
+                # This method of updating the streams queue ensures that discarded
+                # streams are removed and ones which sent are moved to the end even
+                # if an exception occurs in the loop.
+                self._streams_queue = [
+                    stream
+                    for stream in self._streams_queue
+                    if not (stream in discarded or stream in sent)
+                ]
+                self._streams_queue.extend(sent)
 
             if builder.packet_is_empty:
                 break
