@@ -164,7 +164,7 @@ class QuicPacketRecovery:
 
         return None
 
-    # 默认2个rtt时间
+    # 计算PTO，默认2个rtt时间(RFC9002 P6.2)
     def get_probe_timeout(self) -> float:
         if not self._rtt_initialized:
             return 2 * self._rtt_initial
@@ -215,6 +215,7 @@ class QuicPacketRecovery:
         if largest_newly_acked is None:
             return
 
+        # rtt计算只使用每次ack中最大的并且是ack_eliciting的packet(RFC9002 P5.1)
         if largest_acked == largest_newly_acked and is_ack_eliciting:
             latest_rtt = now - largest_sent_time
             log_rtt = True
@@ -222,6 +223,7 @@ class QuicPacketRecovery:
             # limit ACK delay to max_ack_delay
             ack_delay = min(ack_delay, self.max_ack_delay)
 
+            # (RFC9002 P5.3)
             # update RTT estimate, which cannot be < 1 ms
             self._rtt_latest = max(latest_rtt, 0.001)
             if self._rtt_latest < self._rtt_min:

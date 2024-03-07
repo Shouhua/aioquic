@@ -1,3 +1,50 @@
+## 2024-03-07
+https://xiaolincoding.com/network/3_tcp/tcp_feature.html
+重传
+超时重传   RTO(Retransmission Timeout) 根据超时时间来判断是否重传
+快速重传 三次连续的相同ACK，表示某一个packet丢失了
+	如果连续多个packet丢失，需要一个一个重传后，再次触发快速重传，需要接收方将收到packet信息id区间发送给发送方，引入SACK
+	如果接收方收到了packet，但是只是ACK丢失了，同样会触发重传，使用D-SACK告诉对方
+
+滑动窗口(SWND)
+发送一次等待ACK再继续进行，效率低下，引入窗口概念，这要已发送的内容没有占满这个窗口，就可以继续发送，直至占满窗口。
+窗口的实现实际上是操作系统开辟的一个缓存空间，发送方主机在等到确认应答返回之前，必须在缓冲区中保留已发送的数据。如果按期收到确认应答，此时数据就可以从缓存区清除。
+TCP头部中的Window字段表示接收方窗口大小，本地还有多少缓存来接受数据。
+
+
+流量控制(flow control)
+解决发送端和接收端窗口关闭风险
+滑动窗口 swnd = (rwnd - in_flight)
+
+拥塞控制
+控制网络路径拥堵状况。拥塞窗口(CWND)。CWND默认是MSS的倍数，比如1，2，4MSS
+swnd = min(cwnd, rwnd)
+如何判断发生了拥塞，发生了超时重传
+拥塞控制算法：RENO, CUBIC, BBR
+慢启动阶段(slow start) cwnd < ssthresh(Slow start thresh)，收到多少个ack，cwnd增加多少
+拥塞避免阶段(congestion avoidance) cwnd >= ssthresh, 每收到一个ack，cwnd增加1/cwnd，如果发送都受到，相当于增加1
+拥塞控制阶段 
+	超时重传，ssthresh = cwnd / 2; cwnd = 1 -> slow start
+	快速重传还能收到3个ack，说明网络还行，cwnd = cwnd/2；ssthresh = cwnd -> 快速恢复
+快速恢复阶段
+拥塞窗口 cwnd = ssthresh + 3 （ 3 的意思是确认有 3 个数据包被收到了）；
+重传丢失的数据包；
+如果再收到重复的 ACK，那么 cwnd 增加 1；
+如果收到新数据的 ACK 后，把 cwnd 设置为第一步中的 ssthresh 的值，原因是该 ACK 确认了新的数据，说明从 duplicated ACK 时的数据都已收到，该恢复过程已经结束，可以回到恢复之前的状态了，也即再次进入拥塞避免状态；
+
+AIMD(additive increase/multiplicative decrease)
+Congestion Avoidance Algorithm
+Tahoe and Reno，都将RTO和duplicate ACKs作为packet loss events，但是对duplicate ACKs方式不同，前者使用超时重传方式，后者使用快速重传方式
+New Reno 解决Reno没遇到double ACKs就将cwnd减半，如果遇到2个，就减少4倍。
+在Reno的快速恢复中，一旦出现3次重复确认，TCP发送方会重发重复确认对应序列号的分段并设置定时器等待该重发分段包的分段确认包，当该分段确认包收到后，就立即退出快速恢复阶段，进入拥塞控制阶段，但如果某个导致重复确认的分段包到遇到重复确认期间所发送的分段包存在多个丢失的话，则这些丢失只能等待超时重发，并且导致拥塞窗口多次进入拥塞控制阶段而多次下降。而New Reno的快速恢复中，一旦出现3次重复确认，TCP发送方先记下3次重复确认时已发送但未确认的分段的最大序列号，然后重发重复确认对应序列号的分段包。如果只有该重复确认的分段丢失，则接收方接收该重发分段包后，会立即返回最大序列号的分段确认包，从而完成重发；但如果重复确认期间的发送包有多个丢失，接收方在接收该重发分段后，会返回非最大序列号的分段确认包，从而发送方继续保持重发这些丢失的分段，直到最大序列号的分段确认包的返回，才退出快速恢复阶段。
+New Reno主要是没有SACK的tcp中使用解决问题，有了SACK就比较少使用了（https://zh.wikipedia.org/wiki/TCP%E6%8B%A5%E5%A1%9E%E6%8E%A7%E5%88%B6）
+
+
+https://xiaolincoding.com/network/3_tcp/quic.html
+1. RTO使用RTT计算，TCP的packet number不是严格递增的，如果重传，无法知道是原先的响应延迟了，还是重传包的ACK，所以无法计算采样RTT的正确时间，影响RTO
+2. TCP丢包后，窗口不滑动，必须确认后才能继续滑动
+
+
 ## 2024-03-06
 1. /usr/lib/locale/C.utf8/
 包含默认的各种locale category
