@@ -1,3 +1,6 @@
+/**
+ * https://www.openssl.org/docs/manmaster/man7/ossl-guide-tls-client-block.html
+*/
 #include <openssl/bio.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>

@@ -1,3 +1,39 @@
+## 2024-03-14
+### vim中view文件夹
+```vi
+set foldenable
+set foldmethod=manual
+" loadview and mkview when buffer enter and leave
+autocmd BufWinLeave *.* mkview
+autocmd BufWinEnter *.* silent loadview
+```
+上述配置本来是要每次退出时保存当前的`vim`状态，比如折叠等信息，再次进入的时候会加载这些信息。这些信息存储在 `~/.vim/view` 文件夹中。这个配置也带了一些不清晰的误会，比如每次修改`.vimrc`文件后，再次打开其他文件时，发现修改没有生效，比如`tabstop`，问题就出在这个`view`文件，使用`:scriptnames`查看配置文件加载，发现最后加载`view`文件覆盖`.vimrc`文件。如果不需要保存相关信息，可以不使用`mkview`和`loadview`，但是如果想使用配置文件，就需要手动加载`.vimrc`文件(`source ~/.vimrc`)。
+
+### C经验
+1. C中struct分配内存可以连带内部指针一起分配
+ngtcp2_crpyto.c ngtcp2_crypto_km_nocopy_new
+
+### 
+free -h
+lscpu
+or
+cat /proc/cpuinfo
+df -l -T -h -t ext4
+
+## 2024-03-12
+### 查看linux版本信息
+除了通常的lsb_release外，还可以使用如下几个文件查看`/etc/os-release`, `/etc/lsb_release`, `/etc/issue`
+
+### Alpine Linux
+alpine使用ash, musl作为libc, apk作为包管理器，源位于/etc/apk/repositories，源仓库为aports，管理着所有的alpine仓库软件，不同版本软件有不一样
+
+### Docker中Ubuntu，Alpine基础镜像都是non-login shell, 可以修改添加shell参数修改，修改后会加载/etc/profile文件
+```bash
+CMD ["bash", "--login"] # for Ubuntu
+# or
+CMD ["sh", "--login"] # for Alpine
+```
+
 ## 2024-03-07
 https://xiaolincoding.com/network/3_tcp/tcp_feature.html
 重传
