@@ -1,3 +1,55 @@
+## 2024-04-02
+'//' 是C99-style, C89-style没有
+
+## 2024-03-19
+### nginx ssl_cipher ssl_conf_command
+```shell
+# 指定ssl或者tls支持的算法列表
+ssl_cipher ECDHE-ECDSA-AES256-GCM-SHA384
+
+# 主要用于设置tls1.3的ciphersuits，这里只能使用CHACHA20_POLY1305_SHA256
+ssl_conf_command Ciphersuites TLS_CHACHA20_POLY1305_SHA256
+
+# 报错，因为nginx only support CHACHA20_POLY1305_SHA256
+curl --capath "$(pwd)" --cacert ca_cert.pem --http3 -vv --tls13-ciphers TLS_AES_128_GCM_SHA256 https://my.web
+
+# 这个值可作为上面tls1.3的支持算法(Ciphersuits)
+openssl ciphers -s -tls1_3
+openssl ciphers -V -s -tls1_3  | column -t
+```
+
+### volatile in c
+https://www.geeksforgeeks.org/understanding-volatile-qualifier-in-c/
+https://dev.to/pauljlucas/what-volatile-does-in-c-and-c-5147
+valatile本质上是告诉编译器，跟她相关的变量别优化，因为可能有side-effect会修改她，而compiler你有可能不知道
+```c
+/**
+默认不优化，输出正常
+gcc -Wall -Wextra -pedantic -o test test.c
+-O相当于-O1，优化后，可以查看汇编，ptr没有在汇编代码存在过，因为编译器认为const不会被改变，就把相关优化掉了
+gcc -O -Wall -Wextra -pedantic -o test test.c
+
+objdump -D -M intel test
+*/
+#include <stdio.h>
+
+int
+main()
+{
+        const int local = 10;
+        int *ptr = (int *)&local;
+
+        printf("initial value: %d\n", local);
+
+        *ptr = 100;
+
+        printf("modified value: %d\n", local);
+
+        return 0;
+}
+```
+
+
 ## 2024-03-14
 ### vim中view文件夹
 ```vi

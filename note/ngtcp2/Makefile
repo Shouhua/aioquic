@@ -6,7 +6,7 @@ EXE = $(patsubst %.c, %, ${SRC})
 TRACE=-Wl,--trace # 打印GCC搜寻共享库目录
 RPATH=-Wl,-rpath=/usr/local/lib64
 PEDANTIC=-pedantic
-CFLAGS= -g -Wall -Wextra \
+CFLAGS= -rdynamic -DDEBUG -g -Wall -Wextra \
 	${PEDANTIC} \
 	${RPATH} \
 	# ${CREF} \
@@ -26,13 +26,19 @@ build_dir:
 		${LDFLAGS} \
 		-lssl -lcrypto \
 		-lngtcp2 -lngtcp2_crypto_quictls \
-		-lev
+		-lnghttp3 
 
-run: client
-	./build/client "/home/shouhua/project/aioquic/tests/pycacert.pem"
+run_quic: client
+	@SSLKEYLOGFILE=keylog.txt ./build/client $${REMOTE_IP} 8443 "/home/shouhua/project/aioquic/note/ngtcp2/ca_cert.pem"
 
-debug: client
-	gdb --args ./build/client "/home/shouhua/project/aioquic/tests/pycacert.pem"
+debug_quic: client
+	gdb --args ./build/client $${REMOTE_IP} 8443  "/home/shouhua/project/aioquic/note/ngtcp2/ca_cert.pem"
+
+run_http3: http3_client
+	@SSLKEYLOGFILE=keylog.txt ./build/http3_client $$REMOTE_IP 443 ca_cert.pem
+
+debug_http3: http3_client
+	gdb --args ./build/http3_client $${REMOTE_IP} 8443  "/home/shouhua/project/aioquic/note/ngtcp2/ca_cert.pem"
 
 clean: 
 	rm -rfv build

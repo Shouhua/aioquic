@@ -1,31 +1,29 @@
-#include <stdio.h>
-#include <unistd.h>
-#include <stdlib.h>
-#include <fcntl.h>
-#include <errno.h>
-#include <time.h>
-#include <string.h>
-#include <sys/timerfd.h>
-#include <sys/epoll.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <sys/signalfd.h>
-#include <netdb.h>
 #include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
 #include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/epoll.h>
+#include <sys/signalfd.h>
+#include <sys/socket.h>
+#include <sys/timerfd.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <ngtcp2/ngtcp2.h>
 #include <ngtcp2/ngtcp2_crypto.h>
 #include <ngtcp2/ngtcp2_crypto_quictls.h>
 
-#include <openssl/ssl.h>
-#include <openssl/rand.h>
 #include <openssl/err.h>
+#include <openssl/rand.h>
+#include <openssl/ssl.h>
 
 #define MAX_EVENTS 64
 #define MAX_BUFFER 1280
-#define REMOTE_HOST "127.0.0.1"
-#define REMOTE_PORT "4433"
 
 struct stream
 {
@@ -447,7 +445,7 @@ int numeric_host(const char *hostname)
 		   numeric_host_family(hostname, AF_INET6);
 }
 
-int client_ssl_init(struct client *c, const char *cafile)
+int client_ssl_init(struct client *c, char *host, const char *cafile)
 {
 	int err;
 
@@ -487,12 +485,12 @@ int client_ssl_init(struct client *c, const char *cafile)
 	SSL_set_app_data(c->ssl, &c->conn_ref);
 	SSL_set_connect_state(c->ssl);
 	// SSL_set_alpn_protos(c->ssl, (const unsigned char *)ALPN, sizeof(ALPN) - 1);
-	if (!numeric_host(REMOTE_HOST))
+	if (!numeric_host(host))
 	{
-		SSL_set_tlsext_host_name(c->ssl, REMOTE_HOST); // SNI
+		SSL_set_tlsext_host_name(c->ssl, host); // SNI
 	}
 
-	err = SSL_set1_host(c->ssl, "localhost"); // cert hostname
+	err = SSL_set1_host(c->ssl, host); // cert hostname
 	if (err != 1)
 	{
 		fprintf(stderr, "SSL_set1_host失败\n");
@@ -801,8 +799,13 @@ int setup_sig(int epoll_fd)
 
 int main(int argc, char *argv[])
 {
-	(void)argc;
-	char *cafile = argv[1];
+	/* ./client HOST PORT CACERT */
+	if (argc != 4)
+	{
+		fprintf(stderr, "./client HOST PORT CACERT\n");
+		return -1;
+	}
+	char *cafile = argv[3];
 	int epoll_fd = -1, timer_fd = -1, sock_fd = -1, sig_fd = -1;
 	struct sockaddr_storage local_addr, remote_addr;
 	size_t local_addrlen = sizeof(local_addr), remote_addrlen;
@@ -812,7 +815,7 @@ int main(int argc, char *argv[])
 	c.stream.stream_id = -1;
 
 	sock_fd = resolve_and_connect(
-		REMOTE_HOST, REMOTE_PORT,
+		argv[1], argv[2],
 		(struct sockaddr *)&local_addr,
 		&local_addrlen,
 		(struct sockaddr *)&remote_addr,
@@ -829,7 +832,7 @@ int main(int argc, char *argv[])
 	c.remote_addr = remote_addr;
 	c.remote_addrlen = remote_addrlen;
 
-	if (client_ssl_init(&c, cafile) < 0)
+	if (client_ssl_init(&c, argv[1], cafile) < 0)
 	{
 		fprintf(stderr, "client_ssl_init失败\n");
 		return EXIT_FAILURE;
