@@ -4,7 +4,13 @@
  * make run_http3
  * 1. http3 stream data数据分成2个packet，后面packet只是发送了fin，没有任何数据，nghttp3不能正确处理
  * 比如 make http3_client && SSLKEYLOGFILE=keylog.txt ./build/http3_client 142.251.42.238 443 ca_cert.pem
- * 2. early data 0-RTT
+ * fix: 主要是因为收到服务端数据后，qpack decoder stream blocked, 注释以下两行解决
+	// settings.qpack_max_dtable_capacity = 4000;
+	// settings.qpack_blocked_streams = 100;
+ * 2. connection migration DONE
+ * 3. early data 0-RTT
+ * 4. gracefully closed
+	TODO: 后面server搭建时调试添加
  */
 #include <arpa/inet.h>
 #include <assert.h>
@@ -39,7 +45,10 @@
 #define MAX_EVENTS 64
 #define MAX_BUFFER 1280
 
-#define LOCAL_MAX_IDLE_TIMEOUT 5
+#define SOURCE_PORT 9000
+#define MIGRATION_PORT 9001
+
+#define LOCAL_MAX_IDLE_TIMEOUT 60
 /**
  * https://www.openssl.org/docs/manmaster/man3/SSL_set_alpn_protos.html
  * NOTE关于protocol-lists format
@@ -81,6 +90,31 @@ struct client
 	int epoll_fd;
 	int sig_fd;
 };
+
+int get_ip_port(struct sockaddr_storage *addr, char *ip, uint16_t *port)
+{
+	if (ip == NULL && port == NULL)
+		return 0;
+	if (addr->ss_family == AF_INET)
+	{
+		struct sockaddr_in *addrV4 = (struct sockaddr_in *)addr;
+		if (port)
+			*port = ntohs(addrV4->sin_port);
+		if (ip)
+			inet_ntop(addrV4->sin_family, &(addrV4->sin_addr), ip, INET_ADDRSTRLEN);
+		return 0;
+	}
+	else if (addr->ss_family == AF_INET6)
+	{
+		struct sockaddr_in6 *addrV6 = (struct sockaddr_in6 *)addr;
+		if (ip)
+			inet_ntop(addrV6->sin6_family, &(addrV6->sin6_addr), ip, INET6_ADDRSTRLEN);
+		if (port)
+			*port = ntohs(addrV6->sin6_port);
+		return 0;
+	}
+	return -1;
+}
 
 void print_backtrace()
 {
@@ -540,6 +574,98 @@ int submit_http_request(struct client *c)
 	return 0;
 }
 
+int handle_migration(struct client *c)
+{
+	int fd, res;
+	fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (fd < 0)
+	{
+		perror("socket create error");
+		return -1;
+	}
+	struct sockaddr_in source;
+	source.sin_addr.s_addr = htonl(INADDR_ANY);
+	source.sin_family = AF_INET;
+	source.sin_port = htons(MIGRATION_PORT);
+
+	if (bind(fd, (struct sockaddr *)&source, sizeof(source)) == -1)
+	{
+		perror("udp socket bind error");
+		return -1;
+	}
+
+	if (connect(fd, (struct sockaddr *)(&c->remote_addr), c->remote_addrlen) == -1)
+	{
+		perror("migration connection failed");
+		return -1;
+	}
+
+	struct sockaddr_in local;
+	local.sin_family = AF_INET;
+	socklen_t local_len;
+	if (getsockname(fd, (struct sockaddr *)&local, &local_len) == -1)
+	{
+		perror("migration getsockname failed");
+		return -1;
+	}
+
+	char ip[INET_ADDRSTRLEN];
+	uint16_t port;
+	get_ip_port((struct sockaddr_storage *)&local, ip, &port);
+	fprintf(stdout, "migrate getsockname: %s:%d\n", ip, port);
+
+	c->sock_fd = fd;
+	memcpy(&c->local_addr, &local, local_len);
+	c->local_addrlen = local_len;
+
+	ngtcp2_addr addr;
+	ngtcp2_addr_init(&addr, (struct sockaddr *)&local, local_len);
+
+	/**
+	 * https://nghttp2.org/ngtcp2/ngtcp2_conn_set_local_addr.html
+	 * This function is provided for testing purpose only
+	 */
+	// config.nat_rebinding
+	if (0)
+	{
+		ngtcp2_conn_set_local_addr(c->conn, &addr);
+		ngtcp2_conn_set_path_user_data(c->conn, c);
+	}
+	else
+	{
+		ngtcp2_path path = {
+			addr,
+			{
+				(struct sockaddr *)&c->remote_addr,
+				c->remote_addrlen,
+			},
+			c,
+		};
+		/* ngtcp2_conn_initiate_migration 会发送path challenge frame,  ngtcp2_conn_initiate_immediate_migration不会? */
+		if ((res = ngtcp2_conn_initiate_immediate_migration(c->conn, &path, timestamp())) != 0)
+		// if ((res = ngtcp2_conn_initiate_migration(c->conn, &path, timestamp())) != 0)
+		{
+			fprintf(stderr, "ngtcp2_conn_initiate_immediate_migration: %s\n", ngtcp2_strerror(res));
+			return -1;
+		}
+	}
+
+	struct epoll_event ev;
+	ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+	ev.data.fd = c->sock_fd;
+	if (epoll_ctl(c->epoll_fd, EPOLL_CTL_ADD, c->sock_fd, &ev) == -1)
+	{
+		perror("epoll_ctl添加quic socket失败");
+		return -1;
+	}
+
+	return 0;
+}
+
+/**
+ * \x exit
+ * \m migration from port 9000 to 9001
+ */
 int handle_stdin(struct client *c)
 {
 	int ret;
@@ -570,11 +696,16 @@ int handle_stdin(struct client *c)
 		return -1;
 	}
 
-	if (strncmp(buf, "exit", 4) == 0)
+	if (strncmp(buf, "\\x", 2) == 0)
 	{
 		connection_close(c);
 		connection_free(c);
 		exit(0);
+	}
+
+	if (strncmp(buf, "\\m", 2) == 0)
+	{
+		return handle_migration(c);
 	}
 
 	if (submit_http_request(c) == -1)
@@ -676,6 +807,17 @@ int resolve_and_connect(const char *host, const char *port,
 					rp->ai_protocol);
 		if (fd == -1)
 			continue;
+
+		struct sockaddr_in source;
+		source.sin_addr.s_addr = htonl(INADDR_ANY);
+		source.sin_family = rp->ai_family;
+		source.sin_port = htons(SOURCE_PORT);
+
+		if (bind(fd, (struct sockaddr *)&source, sizeof(source)) == -1)
+		{
+			perror("udp socket bind error");
+			return -1;
+		}
 
 		if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0)
 		{
@@ -895,7 +1037,7 @@ int recv_stream_data_cb(ngtcp2_conn *conn __attribute__((unused)),
 			0);
 		return NGTCP2_ERR_CALLBACK_FAILURE;
 	}
-	fprintf(stdout, "收到 %zu 字节 from stream #%zd, consumed: %ld\n", datalen, stream_id, nconsumed);
+	// fprintf(stdout, "收到 %zu 字节 from stream #%zd, consumed: %ld\n", datalen, stream_id, nconsumed);
 	ngtcp2_conn_extend_max_stream_offset(c->conn, stream_id, nconsumed);
 	ngtcp2_conn_extend_max_offset(c->conn, nconsumed);
 	return 0;
@@ -1005,8 +1147,8 @@ int setup_httpconn(struct client *c)
 	};
 	nghttp3_settings settings;
 	nghttp3_settings_default(&settings);
-	settings.qpack_max_dtable_capacity = 4000;
-	settings.qpack_blocked_streams = 100;
+	// settings.qpack_max_dtable_capacity = 4000;
+	// settings.qpack_blocked_streams = 100;
 
 	if ((res = nghttp3_conn_client_new(&c->httpconn, &callbacks, &settings, NULL, c)) != 0)
 	{
@@ -1112,6 +1254,12 @@ int handshake_confirmed(ngtcp2_conn *conn, void *user_data)
 	// start changeg local addr timer
 	// start keyt update timer
 	// start delay stream timer
+	char ip[INET_ADDRSTRLEN];
+	uint16_t port;
+	get_ip_port(&c->local_addr, ip, &port);
+	fprintf(stdout, "Now Client(%s, %d)", ip, port);
+	get_ip_port(&c->remote_addr, ip, &port);
+	fprintf(stdout, " connected to Server(%s, %d)\n", ip, port);
 	return 0;
 }
 
@@ -1139,6 +1287,34 @@ int acked_stream_data_offset(ngtcp2_conn *conn __attribute__((unused)), int64_t 
 	{
 		fprintf(stderr, "nghttp3_conn_add_ack_offset failed: %s\n", nghttp3_strerror(res));
 		return -1;
+	}
+
+	return 0;
+}
+
+int path_validation(ngtcp2_conn *conn, uint32_t flags, const ngtcp2_path *path,
+					const ngtcp2_path *old_path,
+					ngtcp2_path_validation_result res, void *user_data)
+{
+	(void)conn;
+	char ip[INET_ADDRSTRLEN];
+	uint16_t port;
+	get_ip_port((struct sockaddr_storage *)(path->local.addr), ip, &port);
+	fprintf(stdout, "Path validation against path { new local: %s:%d", ip, port);
+	if (old_path)
+	{
+		get_ip_port((struct sockaddr_storage *)(old_path->local.addr), ip, &port);
+		fprintf(stdout, ", old local: %s:%d", ip, port);
+	}
+	get_ip_port((struct sockaddr_storage *)(path->remote.addr), ip, &port);
+	fprintf(stdout, ", remote: %s:%d } %s\n", ip, port, res == NGTCP2_PATH_VALIDATION_RESULT_SUCCESS ? "succeeded" : "failed");
+
+	if (flags & NGTCP2_PATH_VALIDATION_FLAG_PREFERRED_ADDR)
+	{
+		fprintf(stdout, "NGTCP2_PATH_VALIDATION_FLAG_PREFERRED_ADDR");
+		struct client *c = (struct client *)(user_data);
+		memcpy(&c->remote_addr, path->remote.addr, path->remote.addrlen);
+		c->remote_addrlen = path->remote.addrlen;
 	}
 
 	return 0;
@@ -1182,7 +1358,8 @@ int client_quic_init(struct client *c,
 
 		.handshake_confirmed = handshake_confirmed,
 		.extend_max_local_streams_bidi = extend_max_local_streams_bidi,
-		// .extend_max_stream_data = extend_max_stream_data,
+		.extend_max_stream_data = extend_max_stream_data,
+		.path_validation = path_validation,
 	};
 	ngtcp2_cid dcid, scid;
 	ngtcp2_settings settings;

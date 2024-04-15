@@ -6,7 +6,7 @@ EXE = $(patsubst %.c, %, ${SRC})
 TRACE=-Wl,--trace # 打印GCC搜寻共享库目录
 RPATH=-Wl,-rpath=/usr/local/lib64
 PEDANTIC=-pedantic
-CFLAGS= -rdynamic -DDEBUG -g -Wall -Wextra \
+CFLAGS= -rdynamic -DDEBUG -g -O0 -Wall -Wextra \
 	${PEDANTIC} \
 	${RPATH} \
 	# ${CREF} \
@@ -38,7 +38,7 @@ run_http3: http3_client
 	@SSLKEYLOGFILE=keylog.txt ./build/http3_client $$REMOTE_IP 443 ca_cert.pem
 
 debug_http3: http3_client
-	gdb --args ./build/http3_client $${REMOTE_IP} 8443  "/home/shouhua/project/aioquic/note/ngtcp2/ca_cert.pem"
+	gdb --args ./build/http3_client $${REMOTE_IP} 443  "/home/shouhua/project/aioquic/note/ngtcp2/ca_cert.pem"
 
 clean: 
 	rm -rfv build
