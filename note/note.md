@@ -1,3 +1,156 @@
+## 2024-04-17
+### ngtcp2 connection migration代码流程
+TODO
+
+### nghttp3 early data代码流程
+当使用nghttp3客户端可以发送http3 get请求后，下面开始添加支持early data代码流程
+1. OpenSSL session管理
+TLS1.3目前已经抛弃前面版本使用的[Session IDs或者Session tickets](https://datatracker.ietf.org/doc/html/rfc8446#section-2.2)，转而使用PSK(Pre Shared Key)。OpenSSL库还是使用Session的概念管理TLS的Session Resumption。
+
+2. OpenSSL可以配置使用外部pem文件保存session数据
+```c
+/* 在成功新建SSL Context后配置callback保存PSK数据 */
+if (c->session_file)
+{
+     // session stored externally by hand in callback function
+     SSL_CTX_set_session_cache_mode(c->ssl_ctx, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL);
+     SSL_CTX_sess_set_new_cb(c->ssl_ctx, new_session_cb);
+}
+```
+3. Callback中先使用max_early_data参数判断是否支持early data, 然后保存session数据
+```c
+uint32_t max_early_data;
+if ((max_early_data = SSL_SESSION_get_max_early_data(session)) != UINT32_MAX)
+{
+     fprintf(stderr, "max_early_data_size is not 0xffffffff: %#x\n", max_early_data);
+}
+BIO *f = BIO_new_file(c->session_file, "w");
+if (f == NULL)
+{
+     fprintf(stderr, "Could not write TLS session in %s\n", c->session_file);
+     return 0;
+}
+
+if (!PEM_write_bio_SSL_SESSION(f, session))
+{
+     fprintf(stderr, "Unable to write TLS session to file\n");
+}
+
+BIO_free(f);
+```
+4. 新建SSL对象后，加载session数据
+```c
+BIO *f = BIO_new_file(c->session_file, "r");
+if (f == NULL) /* open BIO file failed */
+{
+     fprintf(stderr, "BIO_new_file: Could not read TLS session file %s\n", c->session_file);
+}
+else
+{
+     SSL_SESSION *session = PEM_read_bio_SSL_SESSION(f, NULL, 0, NULL);
+     BIO_free(f);
+     if (session == NULL)
+     {
+          fprintf(stderr, "PEM_read_bio_SSL_SESSION: Could not read TLS session file %s\n", c->session_file);
+     }
+     else
+     {
+          if (!SSL_set_session(c->ssl, session))
+          {
+               fprintf(stderr, "SSL_set_session: Could not set session\n");
+          }
+          else if (!c->disable_early_data && SSL_SESSION_get_max_early_data(session))
+          {
+               c->early_data_enabled = 1;
+               SSL_set_quic_early_data_enabled(c->ssl, 1);
+          }
+          SSL_SESSION_free(session);
+     }
+}
+```
+5. 在应用代码侧，如果可以使用early data功能，就开始传递上次保存的Quic Transport Parameters, 这个是上次通信时保存的pem文件，可以在ngtcp2的handshake_completed的callback中保存
+```c
+/* load quic transport parameters */
+if (c->early_data_enabled && c->tp_file)
+{
+     char *data;
+     long datalen;
+     if ((data = read_pem(c->tp_file, "transport parameters", "QUIC TRANSPORT PARAMETERS", &datalen)) == NULL)
+     {
+          fprintf(stderr, "client quic init early data read pem failed\n");
+          c->early_data_enabled = 0;
+     }
+     else
+     {
+          rv = ngtcp2_conn_decode_and_set_0rtt_transport_params(c->conn, (uint8_t *)data, (size_t)datalen);
+          if (rv != 0)
+          {
+               fprintf(stderr, "ngtcp2_conn_decode_and_set_0rtt_transport_params failed: %s\n", ngtcp2_strerror(rv));
+               c->early_data_enabled = 0;
+          }
+          else if (make_stream_early(c) != 0) // setup nghttp3 connection and populate http3 request
+          {
+               free(data); // free memory which allocated in read_pem function
+               return -1;
+          }
+     }
+     free(data); // free memory which allocated in read_pem function
+}
+```
+```c
+/* save quic transport parameters */
+if (c->tp_file)
+{
+     uint8_t data[256];
+     ngtcp2_ssize datalen = ngtcp2_conn_encode_0rtt_transport_params(c->conn, data, 256);
+     if (datalen < 0)
+     {
+          fprintf(stderr, "Could not encode 0-RTT transport parameters: %s\n", ngtcp2_strerror(datalen));
+          return -1;
+     }
+     else if (write_transport_params(c->tp_file, data, datalen) != 0)
+     {
+          fprintf(stderr, "Could not write transport parameters in %s\n", c->tp_file);
+     }
+}
+```
+
+### [autotools tutorial](https://www.lrde.epita.fr/~adl/dl/autotools.pdf), 见[pdf](./autotools/autotools.pdf)
+1. AC_DEFINE(VARIABLE, VALUE, DESCRIPTION)
+会将定义写入config headers, 比如config.h, `#define VARIABLE VALUE`
+
+2. AC_SUBST(VARIABLE, [VALUE])
+将本地的变量全局化，其他文件可以引用，比如in文件中可以使用, Makefile.am也可以使用，`$(VARIABLE)`
+
+3. AC_CHECK_LIB(LIBRARY, FUNCT, [ACT-IF-FOUND], [ACT-IF-NOT])
+```bash
+AC_CHECK_LIB([efence], [malloc], [EFENCELIB=-lefence])
+AC_SUBST([EFENCELIB])
+```
+如果没有添加`ACT-IF-FOUND`, 会自动添加`LIBS="-lLIBRARY LIBS"`, automake会使用`$LIBS`进行链接, 还会添加定义到config.h, `#define HAVE_LIBLIBRARY`
+
+4. AC_CONFIG_HEADERS([config.h:config.hin])
+从config.hin文件生成config.h头文件，包括各种check定义等, config.h.in文件里面可以引用m4宏, 使用类似@foo@语法
+
+5. AC_CONFIG_FILES([Makefile sub/Makefile script.sh:script.in])
+一般根据in文件生成文件, 一般用于生成Makefile文件
+
+### CPPFLAGS, CFLAGS, CXXFLAGS
+CPPFLAGS(Pre-Processor) 针对C或C++公有的预处理参数，比如-I/local/include或者-D
+CFLAGS 针对C语言的compiler flags
+CXXFLAGS 针对C++语言的compiler flags
+
+### CFLAGS默认值
+CFLAGS在autotools中默认为`'-g -O2'`, 不知道为什么, 清除默认值
+`autoreconf -i && ./configure CFLAGS= && make`
+配置文件中一般使用AM_CFLAGS, AM_CPPFLAGS，CFLAGS，CPPFLAGS留给用户使用时设置
+
+## 2024-04-15
+### tshark
+```shell
+tshark -i ens33 -o tls.keylog_file:/home/shouhua/project/aioquic/note/ngtcp2/keylog.txt -Px -Y 'quic'
+```
+
 ## 2024-04-02
 '//' 是C99-style, C89-style没有
 

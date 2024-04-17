@@ -8,7 +8,7 @@
 	// settings.qpack_max_dtable_capacity = 4000;
 	// settings.qpack_blocked_streams = 100;
  * 2. connection migration DONE
- * 3. early data 0-RTT
+ * 3. early data 0-RTT DONE
  * 4. gracefully closed
 	TODO: 后面server搭建时调试添加
  */
@@ -77,6 +77,11 @@ struct client
 	SSL *ssl;
 	ngtcp2_conn *conn;
 	nghttp3_conn *httpconn;
+	int early_data_enabled;
+	int disable_early_data;
+	char *session_file;
+	char *tp_file;
+	int ticket_received;
 
 	int handshake_confirmed;
 
@@ -576,7 +581,7 @@ int submit_http_request(struct client *c)
 
 int handle_migration(struct client *c)
 {
-	int fd, res;
+	int fd, res, oldfd;
 	fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (fd < 0)
 	{
@@ -591,12 +596,14 @@ int handle_migration(struct client *c)
 	if (bind(fd, (struct sockaddr *)&source, sizeof(source)) == -1)
 	{
 		perror("udp socket bind error");
+		close(fd);
 		return -1;
 	}
 
 	if (connect(fd, (struct sockaddr *)(&c->remote_addr), c->remote_addrlen) == -1)
 	{
 		perror("migration connection failed");
+		close(fd);
 		return -1;
 	}
 
@@ -606,14 +613,11 @@ int handle_migration(struct client *c)
 	if (getsockname(fd, (struct sockaddr *)&local, &local_len) == -1)
 	{
 		perror("migration getsockname failed");
+		close(fd);
 		return -1;
 	}
 
-	char ip[INET_ADDRSTRLEN];
-	uint16_t port;
-	get_ip_port((struct sockaddr_storage *)&local, ip, &port);
-	fprintf(stdout, "migrate getsockname: %s:%d\n", ip, port);
-
+	oldfd = c->sock_fd;
 	c->sock_fd = fd;
 	memcpy(&c->local_addr, &local, local_len);
 	c->local_addrlen = local_len;
@@ -656,9 +660,15 @@ int handle_migration(struct client *c)
 	if (epoll_ctl(c->epoll_fd, EPOLL_CTL_ADD, c->sock_fd, &ev) == -1)
 	{
 		perror("epoll_ctl添加quic socket失败");
+		close(fd);
 		return -1;
 	}
-
+	if (epoll_ctl(c->epoll_fd, EPOLL_CTL_DEL, oldfd, NULL) == -1)
+	{
+		perror("migration epoll_ctl delete fd failed");
+		return -1;
+	}
+	close(oldfd);
 	return 0;
 }
 
@@ -900,6 +910,36 @@ void keylog_callback(const SSL *ssl, const char *line)
 	close(keylogfile);
 }
 
+int new_session_cb(SSL *ssl, SSL_SESSION *session)
+{
+	ngtcp2_crypto_conn_ref *conn_ref = (ngtcp2_crypto_conn_ref *)(SSL_get_app_data(ssl));
+	struct client *c = (struct client *)(conn_ref->user_data);
+
+	c->ticket_received = 1;
+
+	uint32_t max_early_data;
+
+	if ((max_early_data = SSL_SESSION_get_max_early_data(session)) != UINT32_MAX)
+	{
+		fprintf(stderr, "max_early_data_size is not 0xffffffff: %#x\n", max_early_data);
+	}
+	BIO *f = BIO_new_file(c->session_file, "w");
+	if (f == NULL)
+	{
+		fprintf(stderr, "Could not write TLS session in %s\n", c->session_file);
+		return 0;
+	}
+
+	if (!PEM_write_bio_SSL_SESSION(f, session))
+	{
+		fprintf(stderr, "Unable to write TLS session to file\n");
+	}
+
+	BIO_free(f);
+
+	return 0;
+}
+
 int client_ssl_init(struct client *c, char *host, const char *cafile)
 {
 	int err;
@@ -929,6 +969,13 @@ int client_ssl_init(struct client *c, char *host, const char *cafile)
 	{
 		fprintf(stderr, "ngtcp2_crypto_quictls_configure_client_context failed\n");
 		return -1;
+	}
+
+	if (c->session_file)
+	{
+		// session stored externally by hand in callback function
+		SSL_CTX_set_session_cache_mode(c->ssl_ctx, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL);
+		SSL_CTX_sess_set_new_cb(c->ssl_ctx, new_session_cb);
 	}
 
 	c->ssl = SSL_new(c->ssl_ctx);
@@ -970,6 +1017,37 @@ int client_ssl_init(struct client *c, char *host, const char *cafile)
 		return -1;
 	}
 
+	if (c->session_file)
+	{
+		BIO *f = BIO_new_file(c->session_file, "r");
+		if (f == NULL) /* open BIO file failed */
+		{
+			fprintf(stderr, "BIO_new_file: Could not read TLS session file %s\n", c->session_file);
+		}
+		else
+		{
+			SSL_SESSION *session = PEM_read_bio_SSL_SESSION(f, NULL, 0, NULL);
+			BIO_free(f);
+			if (session == NULL)
+			{
+				fprintf(stderr, "PEM_read_bio_SSL_SESSION: Could not read TLS session file %s\n", c->session_file);
+			}
+			else
+			{
+				if (!SSL_set_session(c->ssl, session))
+				{
+					fprintf(stderr, "SSL_set_session: Could not set session\n");
+				}
+				/* SSL_SESSION_get_max_early_data获取server是否支持early data，如果为0表示不支持, 其他数据表示最大的传输数据 */
+				else if (!c->disable_early_data && SSL_SESSION_get_max_early_data(session))
+				{
+					c->early_data_enabled = 1;
+					SSL_set_quic_early_data_enabled(c->ssl, 1);
+				}
+				SSL_SESSION_free(session);
+			}
+		}
+	}
 	return 0;
 }
 
@@ -1198,6 +1276,25 @@ int setup_httpconn(struct client *c)
 	return 0;
 }
 
+int write_pem(char *filename, char *name, char *type, const uint8_t *data, size_t datalen)
+{
+	BIO *f = BIO_new_file(filename, "w");
+	if (f == NULL)
+	{
+		fprintf(stderr, "Could not write %s in %s\n", name, filename);
+		return -1;
+	}
+
+	PEM_write_bio(f, type, "", data, datalen);
+	BIO_free(f);
+	return 0;
+}
+
+int write_transport_params(char *filename, const uint8_t *data, size_t datalen)
+{
+	return write_pem(filename, "transport parameters", "QUIC TRANSPORT PARAMETERS", data, datalen);
+}
+
 int handle_handshake_completed(ngtcp2_conn *conn, void *userdata)
 {
 	struct client *c = (struct client *)userdata;
@@ -1232,6 +1329,21 @@ int handle_handshake_completed(ngtcp2_conn *conn, void *userdata)
 	{
 		fprintf(stderr, "setup_httpconn failed\n");
 		return -1;
+	}
+
+	if (c->tp_file)
+	{
+		uint8_t data[256];
+		ngtcp2_ssize datalen = ngtcp2_conn_encode_0rtt_transport_params(c->conn, data, 256);
+		if (datalen < 0)
+		{
+			fprintf(stderr, "Could not encode 0-RTT transport parameters: %s\n", ngtcp2_strerror(datalen));
+			return -1;
+		}
+		else if (write_transport_params(c->tp_file, data, datalen) != 0)
+		{
+			fprintf(stderr, "Could not write transport parameters in %s\n", c->tp_file);
+		}
 	}
 	return 0;
 }
@@ -1320,6 +1432,51 @@ int path_validation(ngtcp2_conn *conn, uint32_t flags, const ngtcp2_path *path,
 	return 0;
 }
 
+char *read_pem(const char *filename, const char *name, const char *type, long *pdatalen)
+{
+	BIO *f = BIO_new_file(filename, "r");
+	if (f == NULL)
+	{
+		fprintf(stderr, "BIO_new_file: Could not open %s file %s\n", name, filename);
+		return NULL;
+	}
+
+	char *pem_type, *header;
+	unsigned char *data;
+	long datalen;
+
+	if (PEM_read_bio(f, &pem_type, &header, &data, &datalen) != 1)
+	{
+		fprintf(stderr, "PEM_read_bio: Could not open %s file %s\n", name, filename);
+		return NULL;
+	}
+
+	if (strncmp(type, pem_type, strlen(type)) != 0)
+	{
+		fprintf(stderr, "%s file %s contains unexpected type: current type: %s, expected type: %s\n", name, filename, type, pem_type);
+		return NULL;
+	}
+
+	*pdatalen = datalen;
+	char *pdata = malloc(datalen + 1);
+	memcpy(pdata, data, datalen);
+	pdata[datalen] = '\0';
+
+	BIO_free(f);
+	OPENSSL_free(pem_type);
+	OPENSSL_free(header);
+	OPENSSL_free(data);
+
+	return pdata;
+}
+
+int make_stream_early(struct client *c)
+{
+	if (setup_httpconn(c) != 0)
+		return -1;
+	return submit_http_request(c);
+}
+
 int client_quic_init(struct client *c,
 					 struct sockaddr *remote_addr,
 					 socklen_t remote_addrlen,
@@ -1401,6 +1558,32 @@ int client_quic_init(struct client *c,
 	}
 
 	ngtcp2_conn_set_tls_native_handle(c->conn, c->ssl);
+
+	if (c->early_data_enabled && c->tp_file)
+	{
+		char *data;
+		long datalen;
+		if ((data = read_pem(c->tp_file, "transport parameters", "QUIC TRANSPORT PARAMETERS", &datalen)) == NULL)
+		{
+			fprintf(stderr, "client quic init early data read pem failed\n");
+			c->early_data_enabled = 0;
+		}
+		else
+		{
+			rv = ngtcp2_conn_decode_and_set_0rtt_transport_params(c->conn, (uint8_t *)data, (size_t)datalen);
+			if (rv != 0)
+			{
+				fprintf(stderr, "ngtcp2_conn_decode_and_set_0rtt_transport_params failed: %s\n", ngtcp2_strerror(rv));
+				c->early_data_enabled = 0;
+			}
+			else if (make_stream_early(c) != 0)
+			{
+				free(data); // free memory which allocated in read_pem function
+				return -1;
+			}
+		}
+		free(data); // free memory which allocated in read_pem function
+	}
 
 	return 0;
 }
@@ -1554,6 +1737,13 @@ int main(int argc, char *argv[])
 	struct sockaddr_storage local_addr, remote_addr;
 	size_t local_addrlen = sizeof(local_addr), remote_addrlen;
 	struct client c;
+
+	c.ticket_received = 0;
+	c.early_data_enabled = 0;
+
+	c.disable_early_data = 0; /* 使用disable_early_data控制early data功能 */
+	c.session_file = "session.pem";
+	c.tp_file = "tp.pem";
 
 	ngtcp2_ccerr_default(&c.last_error);
 	c.stream.stream_id = -1;
