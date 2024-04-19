@@ -1,11 +1,74 @@
 ## 2024-04-17
-### ngtcp2 connection migration代码流程
-TODO
+### ngtcp2 Connection Migration代码流程
+`Connection Migration`主要使用变更port, 从9000变为9001。当使用输入`\m`后触发port change, 现实中可能是IP变化，总之会触发事件。
+1. 重新生成并且绑定UDP socket
+```c
+fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+bind(fd, (struct sockaddr *)&source, sizeof(source));
+connect(fd, (struct sockaddr *)(&remote), remote_len);
+getsockname(fd, (struct sockaddr *)&local, &local_len)
+```
+2. ngtcp2提供了两种方式处理Connection Migration
+     - nat rebinding
+这种使用了`void ngtcp2_conn_set_local_addr(ngtcp2_conn *conn, const ngtcp2_addr *addr)`, 而这个函数说只用于test。所以这种方法只是设置了local address为新的地址，仅此而已。
+     - 根据协议规定，发送`Path Challenge`，对端回复`Path Response`
+这种方式提供了两个接口
+`int ngtcp2_conn_initiate_immediate_migration(ngtcp2_conn *conn, const ngtcp2_path *path, ngtcp2_tstamp ts)`
+`int ngtcp2_conn_initiate_migration(ngtcp2_conn *conn, const ngtcp2_path *path, ngtcp2_tstamp ts)`
+两者都会发送`Path Challenge Frame`，但是前者不会等待server端的`Path Response`才迁移，后者是最严格的流程。
+```c
+ngtcp2_addr addr;
+ngtcp2_addr_init(&addr, (struct sockaddr *)&local, local_len);
+if (0) // nat rebinding
+{
+     ngtcp2_conn_set_local_addr(conn, &addr);
+     ngtcp2_conn_set_path_user_data(conn, client);
+}
+else
+{
+     ngtcp2_path path = {
+          addr,
+          {
+               (struct sockaddr *)&remote,
+               remote_len,
+          },
+          client,
+     };
+     if ((res = ngtcp2_conn_initiate_immediate_migration(conn, &path, timestamp())) != 0)
+     // if ((res = ngtcp2_conn_initiate_migration(conn, &path, timestamp())) != 0)
+     {
+          fprintf(stderr, "ngtcp2_conn_initiate_immediate_migration: %s\n", ngtcp2_strerror(res));
+          return -1;
+     }
+}
+```
+3. 处理path_validation callback
+```c
+int path_validation(ngtcp2_conn *conn, uint32_t flags, const ngtcp2_path *path,
+					const ngtcp2_path *old_path,
+					ngtcp2_path_validation_result res, void *user_data)
+{
+	(void)conn;
+	if (old_path) // 一般没有填充
+	{
+		get_ip_port((struct sockaddr_storage *)(old_path->local.addr), ip, &port);
+		fprintf(stdout, ", old local: %s:%d", ip, port);
+	}
+
+	if (flags & NGTCP2_PATH_VALIDATION_FLAG_PREFERRED_ADDR)
+	{
+		struct client *c = (struct client *)(user_data);
+		memcpy(&c->remote_addr, path->remote.addr, path->remote.addrlen);
+		c->remote_addrlen = path->remote.addrlen;
+	}
+	return 0;
+}
+```
 
 ### nghttp3 early data代码流程
-当使用nghttp3客户端可以发送http3 get请求后，下面开始添加支持early data代码流程
+当使用nghttp3客户端可以发送http3 get请求后, 下面开始添加支持early data代码流程
 1. OpenSSL session管理
-TLS1.3目前已经抛弃前面版本使用的[Session IDs或者Session tickets](https://datatracker.ietf.org/doc/html/rfc8446#section-2.2)，转而使用PSK(Pre Shared Key)。OpenSSL库还是使用Session的概念管理TLS的Session Resumption。
+TLS1.3目前已经抛弃前面版本使用的[Session IDs或者Session tickets](https://datatracker.ietf.org/doc/html/rfc8446#section-2.2), 转而使用PSK(Pre Shared Key)。OpenSSL库还是使用Session的概念管理TLS的Session Resumption。
 
 2. OpenSSL可以配置使用外部pem文件保存session数据
 ```c
@@ -38,7 +101,7 @@ if (!PEM_write_bio_SSL_SESSION(f, session))
 
 BIO_free(f);
 ```
-4. 新建SSL对象后，加载session数据
+4. 新建SSL对象后, 加载session数据
 ```c
 BIO *f = BIO_new_file(c->session_file, "r");
 if (f == NULL) /* open BIO file failed */
@@ -68,7 +131,7 @@ else
      }
 }
 ```
-5. 在应用代码侧，如果可以使用early data功能，就开始传递上次保存的Quic Transport Parameters, 这个是上次通信时保存的pem文件，可以在ngtcp2的handshake_completed的callback中保存
+5. 在应用代码侧, 如果可以使用early data功能, 就开始传递上次保存的Quic Transport Parameters, 这个是上次通信时保存的pem文件, 可以在ngtcp2的handshake_completed的callback中保存
 ```c
 /* load quic transport parameters */
 if (c->early_data_enabled && c->tp_file)
@@ -126,30 +189,30 @@ if (c->tp_file)
 会将定义写入config headers, 比如config.h, `#define VARIABLE VALUE`
 
 2. AC_SUBST(VARIABLE, [VALUE])
-将本地的变量全局化，其他文件可以引用，比如in文件中可以使用, Makefile.am也可以使用，`$(VARIABLE)`
+将本地的变量全局化, 其他文件可以引用, 比如in文件中可以使用, Makefile.am也可以使用, `$(VARIABLE)`
 
 3. AC_CHECK_LIB(LIBRARY, FUNCT, [ACT-IF-FOUND], [ACT-IF-NOT])
 ```bash
 AC_CHECK_LIB([efence], [malloc], [EFENCELIB=-lefence])
 AC_SUBST([EFENCELIB])
 ```
-如果没有添加`ACT-IF-FOUND`, 会自动添加`LIBS="-lLIBRARY LIBS"`, automake会使用`$LIBS`进行链接, 还会添加定义到config.h, `#define HAVE_LIBLIBRARY`
+如果没有添加`ACT-IF-FOUND`, 会自动添加`LIBS="-lLIBRARY LIBS"`, automake会使用`$LIBS`进行链接, 还会添加定义到`config.h`, `#define HAVE_LIBLIBRARY`
 
 4. AC_CONFIG_HEADERS([config.h:config.hin])
-从config.hin文件生成config.h头文件，包括各种check定义等, config.h.in文件里面可以引用m4宏, 使用类似@foo@语法
+从`config.hin`文件生成`config.h`头文件, 包括各种check定义等, `config.h.in`文件里面可以引用m4宏, 使用类似`@foo@`语法
 
 5. AC_CONFIG_FILES([Makefile sub/Makefile script.sh:script.in])
-一般根据in文件生成文件, 一般用于生成Makefile文件, in文件和最终文件里面使用@VAR@引用，但是Makefile.in也可以使用Makefile方式，比如$(VAR)或者${VAR}引用，因为automake做了处理, VAR=@VAR@
+一般根据in文件生成文件, 一般用于生成Makefile文件, in文件和最终文件里面使用`@VAR@`引用, 但是`Makefile.in`也可以使用`Makefile`方式, 比如`$(VAR)`或者`${VAR}`引用, 因为automake做了处理, `VAR=@VAR@`
 
 ### CPPFLAGS, CFLAGS, CXXFLAGS
-CPPFLAGS(Pre-Processor) 针对C或C++公有的预处理参数，比如-I/local/include或者-D
+CPPFLAGS(Pre-Processor) 针对C或C++公有的预处理参数, 比如`-I/local/include`或者`-D`
 CFLAGS 针对C语言的compiler flags
 CXXFLAGS 针对C++语言的compiler flags
 
 ### CFLAGS默认值
 CFLAGS在autotools中默认为`'-g -O2'`, 不知道为什么, 清除默认值
 `autoreconf -i && ./configure CFLAGS= && make`
-配置文件中一般使用AM_CFLAGS, AM_CPPFLAGS，CFLAGS，CPPFLAGS留给用户使用时设置
+配置文件中一般使用`AM_CFLAGS`和`AM_CPPFLAGS`, `CFLAGS`, `CPPFLAGS`留给用户使用时设置
 
 ## 2024-04-15
 ### tshark
@@ -166,10 +229,10 @@ tshark -i ens33 -o tls.keylog_file:/home/shouhua/project/aioquic/note/ngtcp2/key
 # 指定ssl或者tls支持的算法列表
 ssl_cipher ECDHE-ECDSA-AES256-GCM-SHA384
 
-# 主要用于设置tls1.3的ciphersuits，这里只能使用CHACHA20_POLY1305_SHA256
+# 主要用于设置tls1.3的ciphersuits, 这里只能使用CHACHA20_POLY1305_SHA256
 ssl_conf_command Ciphersuites TLS_CHACHA20_POLY1305_SHA256
 
-# 报错，因为nginx only support CHACHA20_POLY1305_SHA256
+# 报错, 因为nginx only support CHACHA20_POLY1305_SHA256
 curl --capath "$(pwd)" --cacert ca_cert.pem --http3 -vv --tls13-ciphers TLS_AES_128_GCM_SHA256 https://my.web
 
 # 这个值可作为上面tls1.3的支持算法(Ciphersuits)
@@ -180,12 +243,12 @@ openssl ciphers -V -s -tls1_3  | column -t
 ### volatile in c
 https://www.geeksforgeeks.org/understanding-volatile-qualifier-in-c/
 https://dev.to/pauljlucas/what-volatile-does-in-c-and-c-5147
-valatile本质上是告诉编译器，跟她相关的变量别优化，因为可能有side-effect会修改她，而compiler你有可能不知道
+valatile本质上是告诉编译器, 跟她相关的变量别优化, 因为可能有side-effect会修改她, 而compiler你有可能不知道
 ```c
 /**
-默认不优化，输出正常
+默认不优化, 输出正常
 gcc -Wall -Wextra -pedantic -o test test.c
--O相当于-O1，优化后，可以查看汇编，ptr没有在汇编代码存在过，因为编译器认为const不会被改变，就把相关优化掉了
+-O相当于-O1, 优化后, 可以查看汇编, ptr没有在汇编代码存在过, 因为编译器认为const不会被改变, 就把相关优化掉了
 gcc -O -Wall -Wextra -pedantic -o test test.c
 
 objdump -D -M intel test
@@ -218,7 +281,7 @@ set foldmethod=manual
 autocmd BufWinLeave *.* mkview
 autocmd BufWinEnter *.* silent loadview
 ```
-上述配置本来是要每次退出时保存当前的`vim`状态，比如折叠等信息，再次进入的时候会加载这些信息。这些信息存储在 `~/.vim/view` 文件夹中。这个配置也带了一些不清晰的误会，比如每次修改`.vimrc`文件后，再次打开其他文件时，发现修改没有生效，比如`tabstop`，问题就出在这个`view`文件，使用`:scriptnames`查看配置文件加载，发现最后加载`view`文件覆盖`.vimrc`文件。如果不需要保存相关信息，可以不使用`mkview`和`loadview`，但是如果想使用配置文件，就需要手动加载`.vimrc`文件(`source ~/.vimrc`)。
+上述配置本来是要每次退出时保存当前的`vim`状态, 比如折叠等信息, 再次进入的时候会加载这些信息。这些信息存储在 `~/.vim/view` 文件夹中。这个配置也带了一些不清晰的误会, 比如每次修改`.vimrc`文件后, 再次打开其他文件时, 发现修改没有生效, 比如`tabstop`, 问题就出在这个`view`文件, 使用`:scriptnames`查看配置文件加载, 发现最后加载`view`文件覆盖`.vimrc`文件。如果不需要保存相关信息, 可以不使用`mkview`和`loadview`, 但是如果想使用配置文件, 就需要手动加载`.vimrc`文件(`source ~/.vimrc`)。
 
 ### C经验
 1. C中struct分配内存可以连带内部指针一起分配
@@ -233,12 +296,12 @@ df -l -T -h -t ext4
 
 ## 2024-03-12
 ### 查看linux版本信息
-除了通常的lsb_release外，还可以使用如下几个文件查看`/etc/os-release`, `/etc/lsb_release`, `/etc/issue`
+除了通常的lsb_release外, 还可以使用如下几个文件查看`/etc/os-release`, `/etc/lsb_release`, `/etc/issue`
 
 ### Alpine Linux
-alpine使用ash, musl作为libc, apk作为包管理器，源位于/etc/apk/repositories，源仓库为aports，管理着所有的alpine仓库软件，不同版本软件有不一样
+alpine使用ash, musl作为libc, apk作为包管理器, 源位于/etc/apk/repositories, 源仓库为aports, 管理着所有的alpine仓库软件, 不同版本软件有不一样
 
-### Docker中Ubuntu，Alpine基础镜像都是non-login shell, 可以修改添加shell参数修改，修改后会加载/etc/profile文件
+### Docker中Ubuntu, Alpine基础镜像都是non-login shell, 可以修改添加shell参数修改, 修改后会加载/etc/profile文件
 ```bash
 CMD ["bash", "--login"] # for Ubuntu
 # or
@@ -249,14 +312,14 @@ CMD ["sh", "--login"] # for Alpine
 https://xiaolincoding.com/network/3_tcp/tcp_feature.html
 重传
 超时重传   RTO(Retransmission Timeout) 根据超时时间来判断是否重传
-快速重传 三次连续的相同ACK，表示某一个packet丢失了
-	如果连续多个packet丢失，需要一个一个重传后，再次触发快速重传，需要接收方将收到packet信息id区间发送给发送方，引入SACK
-	如果接收方收到了packet，但是只是ACK丢失了，同样会触发重传，使用D-SACK告诉对方
+快速重传 三次连续的相同ACK, 表示某一个packet丢失了
+	如果连续多个packet丢失, 需要一个一个重传后, 再次触发快速重传, 需要接收方将收到packet信息id区间发送给发送方, 引入SACK
+	如果接收方收到了packet, 但是只是ACK丢失了, 同样会触发重传, 使用D-SACK告诉对方
 
 滑动窗口(SWND)
-发送一次等待ACK再继续进行，效率低下，引入窗口概念，这要已发送的内容没有占满这个窗口，就可以继续发送，直至占满窗口。
-窗口的实现实际上是操作系统开辟的一个缓存空间，发送方主机在等到确认应答返回之前，必须在缓冲区中保留已发送的数据。如果按期收到确认应答，此时数据就可以从缓存区清除。
-TCP头部中的Window字段表示接收方窗口大小，本地还有多少缓存来接受数据。
+发送一次等待ACK再继续进行, 效率低下, 引入窗口概念, 这要已发送的内容没有占满这个窗口, 就可以继续发送, 直至占满窗口。
+窗口的实现实际上是操作系统开辟的一个缓存空间, 发送方主机在等到确认应答返回之前, 必须在缓冲区中保留已发送的数据。如果按期收到确认应答, 此时数据就可以从缓存区清除。
+TCP头部中的Window字段表示接收方窗口大小, 本地还有多少缓存来接受数据。
 
 
 流量控制(flow control)
@@ -264,32 +327,32 @@ TCP头部中的Window字段表示接收方窗口大小，本地还有多少缓�
 滑动窗口 swnd = (rwnd - in_flight)
 
 拥塞控制
-控制网络路径拥堵状况。拥塞窗口(CWND)。CWND默认是MSS的倍数，比如1，2，4MSS
+控制网络路径拥堵状况。拥塞窗口(CWND)。CWND默认是MSS的倍数, 比如1, 2, 4MSS
 swnd = min(cwnd, rwnd)
-如何判断发生了拥塞，发生了超时重传
+如何判断发生了拥塞, 发生了超时重传
 拥塞控制算法：RENO, CUBIC, BBR
-慢启动阶段(slow start) cwnd < ssthresh(Slow start thresh)，收到多少个ack，cwnd增加多少
-拥塞避免阶段(congestion avoidance) cwnd >= ssthresh, 每收到一个ack，cwnd增加1/cwnd，如果发送都受到，相当于增加1
+慢启动阶段(slow start) cwnd < ssthresh(Slow start thresh), 收到多少个ack, cwnd增加多少
+拥塞避免阶段(congestion avoidance) cwnd >= ssthresh, 每收到一个ack, cwnd增加1/cwnd, 如果发送都受到, 相当于增加1
 拥塞控制阶段 
-	超时重传，ssthresh = cwnd / 2; cwnd = 1 -> slow start
-	快速重传还能收到3个ack，说明网络还行，cwnd = cwnd/2；ssthresh = cwnd -> 快速恢复
+	超时重传, ssthresh = cwnd / 2; cwnd = 1 -> slow start
+	快速重传还能收到3个ack, 说明网络还行, cwnd = cwnd/2；ssthresh = cwnd -> 快速恢复
 快速恢复阶段
 拥塞窗口 cwnd = ssthresh + 3 （ 3 的意思是确认有 3 个数据包被收到了）；
 重传丢失的数据包；
-如果再收到重复的 ACK，那么 cwnd 增加 1；
-如果收到新数据的 ACK 后，把 cwnd 设置为第一步中的 ssthresh 的值，原因是该 ACK 确认了新的数据，说明从 duplicated ACK 时的数据都已收到，该恢复过程已经结束，可以回到恢复之前的状态了，也即再次进入拥塞避免状态；
+如果再收到重复的 ACK, 那么 cwnd 增加 1；
+如果收到新数据的 ACK 后, 把 cwnd 设置为第一步中的 ssthresh 的值, 原因是该 ACK 确认了新的数据, 说明从 duplicated ACK 时的数据都已收到, 该恢复过程已经结束, 可以回到恢复之前的状态了, 也即再次进入拥塞避免状态；
 
 AIMD(additive increase/multiplicative decrease)
 Congestion Avoidance Algorithm
-Tahoe and Reno，都将RTO和duplicate ACKs作为packet loss events，但是对duplicate ACKs方式不同，前者使用超时重传方式，后者使用快速重传方式
-New Reno 解决Reno没遇到double ACKs就将cwnd减半，如果遇到2个，就减少4倍。
-在Reno的快速恢复中，一旦出现3次重复确认，TCP发送方会重发重复确认对应序列号的分段并设置定时器等待该重发分段包的分段确认包，当该分段确认包收到后，就立即退出快速恢复阶段，进入拥塞控制阶段，但如果某个导致重复确认的分段包到遇到重复确认期间所发送的分段包存在多个丢失的话，则这些丢失只能等待超时重发，并且导致拥塞窗口多次进入拥塞控制阶段而多次下降。而New Reno的快速恢复中，一旦出现3次重复确认，TCP发送方先记下3次重复确认时已发送但未确认的分段的最大序列号，然后重发重复确认对应序列号的分段包。如果只有该重复确认的分段丢失，则接收方接收该重发分段包后，会立即返回最大序列号的分段确认包，从而完成重发；但如果重复确认期间的发送包有多个丢失，接收方在接收该重发分段后，会返回非最大序列号的分段确认包，从而发送方继续保持重发这些丢失的分段，直到最大序列号的分段确认包的返回，才退出快速恢复阶段。
-New Reno主要是没有SACK的tcp中使用解决问题，有了SACK就比较少使用了（https://zh.wikipedia.org/wiki/TCP%E6%8B%A5%E5%A1%9E%E6%8E%A7%E5%88%B6）
+Tahoe and Reno, 都将RTO和duplicate ACKs作为packet loss events, 但是对duplicate ACKs方式不同, 前者使用超时重传方式, 后者使用快速重传方式
+New Reno 解决Reno没遇到double ACKs就将cwnd减半, 如果遇到2个, 就减少4倍。
+在Reno的快速恢复中, 一旦出现3次重复确认, TCP发送方会重发重复确认对应序列号的分段并设置定时器等待该重发分段包的分段确认包, 当该分段确认包收到后, 就立即退出快速恢复阶段, 进入拥塞控制阶段, 但如果某个导致重复确认的分段包到遇到重复确认期间所发送的分段包存在多个丢失的话, 则这些丢失只能等待超时重发, 并且导致拥塞窗口多次进入拥塞控制阶段而多次下降。而New Reno的快速恢复中, 一旦出现3次重复确认, TCP发送方先记下3次重复确认时已发送但未确认的分段的最大序列号, 然后重发重复确认对应序列号的分段包。如果只有该重复确认的分段丢失, 则接收方接收该重发分段包后, 会立即返回最大序列号的分段确认包, 从而完成重发；但如果重复确认期间的发送包有多个丢失, 接收方在接收该重发分段后, 会返回非最大序列号的分段确认包, 从而发送方继续保持重发这些丢失的分段, 直到最大序列号的分段确认包的返回, 才退出快速恢复阶段。
+New Reno主要是没有SACK的tcp中使用解决问题, 有了SACK就比较少使用了（https://zh.wikipedia.org/wiki/TCP%E6%8B%A5%E5%A1%9E%E6%8E%A7%E5%88%B6）
 
 
 https://xiaolincoding.com/network/3_tcp/quic.html
-1. RTO使用RTT计算，TCP的packet number不是严格递增的，如果重传，无法知道是原先的响应延迟了，还是重传包的ACK，所以无法计算采样RTT的正确时间，影响RTO
-2. TCP丢包后，窗口不滑动，必须确认后才能继续滑动
+1. RTO使用RTT计算, TCP的packet number不是严格递增的, 如果重传, 无法知道是原先的响应延迟了, 还是重传包的ACK, 所以无法计算采样RTT的正确时间, 影响RTO
+2. TCP丢包后, 窗口不滑动, 必须确认后才能继续滑动
 
 
 ## 2024-03-06
