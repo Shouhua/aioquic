@@ -116,6 +116,12 @@ if (c->tp_file)
 ```
 
 ### [autotools tutorial](https://www.lrde.epita.fr/~adl/dl/autotools.pdf), 见[pdf](./autotools/autotools.pdf)
+#### Tutorial
+1. https://www.lrde.epita.fr/~adl/dl/autotools.pdf
+2. https://elinux.org/images/4/43/Petazzoni.pdf
+3. https://www.chungkwong.cc/makefile.html
+
+#### 宏解释
 1. AC_DEFINE(VARIABLE, VALUE, DESCRIPTION)
 会将定义写入config headers, 比如config.h, `#define VARIABLE VALUE`
 
@@ -133,7 +139,7 @@ AC_SUBST([EFENCELIB])
 从config.hin文件生成config.h头文件，包括各种check定义等, config.h.in文件里面可以引用m4宏, 使用类似@foo@语法
 
 5. AC_CONFIG_FILES([Makefile sub/Makefile script.sh:script.in])
-一般根据in文件生成文件, 一般用于生成Makefile文件
+一般根据in文件生成文件, 一般用于生成Makefile文件, in文件和最终文件里面使用@VAR@引用，但是Makefile.in也可以使用Makefile方式，比如$(VAR)或者${VAR}引用，因为automake做了处理, VAR=@VAR@
 
 ### CPPFLAGS, CFLAGS, CXXFLAGS
 CPPFLAGS(Pre-Processor) 针对C或C++公有的预处理参数，比如-I/local/include或者-D
