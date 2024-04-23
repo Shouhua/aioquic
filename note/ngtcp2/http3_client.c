@@ -1,6 +1,8 @@
 /**
  * http3 client by using ngtcp2 and nghttp3
- * make http3_client
+ * make http3_client && SSLKEYLOGFILE=keylog.txt ./build/http3_client --disable-early-data -k 142.251.42.238 443
+ * make http3_client && SSLKEYLOGFILE=keylog.txt ./build/http3_client --disable-early-data -k www.example.org 443
+ * make http3_client && SSLKEYLOGFILE=keylog.txt ./build/http3_client --disable-early-data -k $REMOTE_IP 443
  * make run_http3
  * 1. http3 stream data数据分成2个packet，后面packet只是发送了fin，没有任何数据，nghttp3不能正确处理
  * 比如 make http3_client && SSLKEYLOGFILE=keylog.txt ./build/http3_client 142.251.42.238 443 ca_cert.pem
@@ -41,6 +43,7 @@
 #include <openssl/ssl.h>
 
 #include <execinfo.h>
+#include <getopt.h>
 
 #define MAX_EVENTS 64
 #define MAX_BUFFER 1280
@@ -58,6 +61,28 @@
 int ssl_userdata_idx;
 const char LOWER_XDIGITS[] = "0123456789abcdef";
 
+typedef enum
+{
+	INFO,
+	ERROR
+} Level;
+
+void print_debug(int level, const char *fmt, ...)
+{
+	char msgbuf[256];
+	va_list ap;
+
+	va_start(ap, fmt);
+	int n = vsnprintf(msgbuf, 256, fmt, ap);
+	va_end(ap);
+
+	if (n > 256)
+		n = 256;
+	msgbuf[n++] = '\n';
+
+	fprintf(stderr, "[%s] %s", level == 0 ? "INFO" : "ERROR", msgbuf);
+}
+
 struct stream
 {
 	int64_t stream_id;
@@ -66,28 +91,43 @@ struct stream
 	size_t nwrite;
 };
 
+typedef struct
+{
+	int check_cert;			// 是否检验server证书
+	int verbose;			// 是否打印调试信息
+	int disable_early_data; // 是否禁用early data功能
+	char *ca_file;
+	char *private_key_file;
+	char *session_file;					 // 保存new session ticket信息的PEM文件，用于session resumption or 0-RTT
+	char *quic_transport_parameter_file; // save previous QUIC transprant parameters as PEM file, used for session resumption or 0-RTT
+} Config;
+
 struct client
 {
+	/* TLS1.3 related */
+	SSL_CTX *ssl_ctx;
+	SSL *ssl;
+
+	/* ngtcp2 related */
 	ngtcp2_crypto_conn_ref conn_ref;
 	struct sockaddr_storage local_addr;
 	socklen_t local_addrlen;
 	struct sockaddr_storage remote_addr;
 	socklen_t remote_addrlen;
-	SSL_CTX *ssl_ctx;
-	SSL *ssl;
 	ngtcp2_conn *conn;
-	nghttp3_conn *httpconn;
-	int early_data_enabled;
-	int disable_early_data;
-	char *session_file;
-	char *tp_file;
-	int ticket_received;
-
-	int handshake_confirmed;
-
-	struct stream stream;
-
 	ngtcp2_ccerr last_error;
+
+	/* nghttp3 related */
+	nghttp3_conn *httpconn;
+
+	/* Session Resumption or 0-RTT */
+	int early_data_enabled;
+	int ticket_received;
+	int handshake_confirmed; // 设置状态，暂时没有用到
+
+	Config config;
+
+	struct stream stream; // 暂时没有用到
 
 	/* server交互socket */
 	int sock_fd;
@@ -572,10 +612,6 @@ int submit_http_request(struct client *c)
 		fprintf(stderr, "nghttp3_conn_submit_request failed: %s\n", nghttp3_strerror(res));
 		return -1;
 	}
-
-#ifdef DEBUG
-	// print_backtrace();
-#endif
 	return 0;
 }
 
@@ -923,10 +959,10 @@ int new_session_cb(SSL *ssl, SSL_SESSION *session)
 	{
 		fprintf(stderr, "max_early_data_size is not 0xffffffff: %#x\n", max_early_data);
 	}
-	BIO *f = BIO_new_file(c->session_file, "w");
+	BIO *f = BIO_new_file(c->config.session_file, "w");
 	if (f == NULL)
 	{
-		fprintf(stderr, "Could not write TLS session in %s\n", c->session_file);
+		fprintf(stderr, "Could not write TLS session in %s\n", c->config.session_file);
 		return 0;
 	}
 
@@ -940,7 +976,7 @@ int new_session_cb(SSL *ssl, SSL_SESSION *session)
 	return 0;
 }
 
-int client_ssl_init(struct client *c, char *host, const char *cafile)
+int client_ssl_init(struct client *c, char *host, const char *cafile, const char *private_key_file)
 {
 	int err;
 
@@ -951,18 +987,38 @@ int client_ssl_init(struct client *c, char *host, const char *cafile)
 				ERR_error_string(ERR_get_error(), NULL));
 		return -1;
 	}
-	if (cafile)
-		err = SSL_CTX_load_verify_locations(c->ssl_ctx, cafile, NULL);
-	else
-		SSL_CTX_set_default_verify_paths(c->ssl_ctx);
-	if (err == 0)
+	if (cafile && private_key_file)
 	{
-		fprintf(stderr, "Could not load trusted certificates: %s\n", ERR_error_string(ERR_get_error(), NULL));
-		return -1;
+		if (SSL_CTX_use_PrivateKey_file(c->ssl_ctx, private_key_file, SSL_FILETYPE_PEM) != 1)
+		{
+			fprintf(stderr, "SSL_CTX_use_PrivateKey_file: %s\n", ERR_error_string(ERR_get_error(), NULL));
+			return -1;
+		}
+
+		if (SSL_CTX_load_verify_locations(c->ssl_ctx, cafile, NULL) == 0)
+		{
+			fprintf(stderr, "SSL_CTX_load_verify_locations: %s\n", ERR_error_string(ERR_get_error(), NULL));
+			return -1;
+		}
+	}
+	else
+	{
+		err = SSL_CTX_set_default_verify_paths(c->ssl_ctx);
+		if (err == 0)
+		{
+			fprintf(stderr, "Could not load trusted certificates: %s\n", ERR_error_string(ERR_get_error(), NULL));
+			return -1;
+		}
 	}
 
-	// SSL_CTX_set_verify(c->ssl_ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL); // 默认证书校验
-	SSL_CTX_set_verify(c->ssl_ctx, SSL_VERIFY_NONE, NULL); // 默认证书校验
+	if (c->config.check_cert)
+	{
+		SSL_CTX_set_verify(c->ssl_ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL); // 证书校验
+	}
+	else
+	{
+		SSL_CTX_set_verify(c->ssl_ctx, SSL_VERIFY_NONE, NULL); // 不校验证书
+	}
 	SSL_CTX_set_mode(c->ssl_ctx, SSL_MODE_AUTO_RETRY);
 
 	if (ngtcp2_crypto_quictls_configure_client_context(c->ssl_ctx) != 0)
@@ -971,7 +1027,7 @@ int client_ssl_init(struct client *c, char *host, const char *cafile)
 		return -1;
 	}
 
-	if (c->session_file)
+	if (!c->config.disable_early_data && c->config.session_file)
 	{
 		// session stored externally by hand in callback function
 		SSL_CTX_set_session_cache_mode(c->ssl_ctx, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL);
@@ -1017,12 +1073,12 @@ int client_ssl_init(struct client *c, char *host, const char *cafile)
 		return -1;
 	}
 
-	if (c->session_file)
+	if (!c->config.disable_early_data && c->config.session_file) /* 只有使用early data时才设置session, 如果做session resumption可以放开 */
 	{
-		BIO *f = BIO_new_file(c->session_file, "r");
+		BIO *f = BIO_new_file(c->config.session_file, "r");
 		if (f == NULL) /* open BIO file failed */
 		{
-			fprintf(stderr, "BIO_new_file: Could not read TLS session file %s\n", c->session_file);
+			fprintf(stderr, "BIO_new_file: Could not read TLS session file %s\n", c->config.session_file);
 		}
 		else
 		{
@@ -1030,7 +1086,7 @@ int client_ssl_init(struct client *c, char *host, const char *cafile)
 			BIO_free(f);
 			if (session == NULL)
 			{
-				fprintf(stderr, "PEM_read_bio_SSL_SESSION: Could not read TLS session file %s\n", c->session_file);
+				fprintf(stderr, "PEM_read_bio_SSL_SESSION: Could not read TLS session file %s\n", c->config.session_file);
 			}
 			else
 			{
@@ -1039,7 +1095,7 @@ int client_ssl_init(struct client *c, char *host, const char *cafile)
 					fprintf(stderr, "SSL_set_session: Could not set session\n");
 				}
 				/* SSL_SESSION_get_max_early_data获取server是否支持early data，如果为0表示不支持, 其他数据表示最大的传输数据 */
-				else if (!c->disable_early_data && SSL_SESSION_get_max_early_data(session))
+				else if (!c->config.disable_early_data && SSL_SESSION_get_max_early_data(session))
 				{
 					c->early_data_enabled = 1;
 					SSL_set_quic_early_data_enabled(c->ssl, 1);
@@ -1246,9 +1302,8 @@ int setup_httpconn(struct client *c)
 		return -1;
 	}
 
-#ifdef DEBUG
-	fprintf(stderr, "http: control stream=%ld\n", ctrl_stream_id);
-#endif
+	if (c->config.verbose)
+		fprintf(stderr, "http: control stream=%ld\n", ctrl_stream_id);
 
 	int64_t qpack_enc_stream_id, qpack_dec_stream_id;
 
@@ -1270,9 +1325,8 @@ int setup_httpconn(struct client *c)
 		return -1;
 	}
 
-#ifdef DEBUG
-	fprintf(stdout, "http: QPACK streams encoder=%ld decoder=%ld\n", qpack_enc_stream_id, qpack_dec_stream_id);
-#endif
+	if (c->config.verbose)
+		fprintf(stdout, "http: QPACK streams encoder=%ld decoder=%ld\n", qpack_enc_stream_id, qpack_dec_stream_id);
 	return 0;
 }
 
@@ -1298,14 +1352,15 @@ int write_transport_params(char *filename, const uint8_t *data, size_t datalen)
 int handle_handshake_completed(ngtcp2_conn *conn, void *userdata)
 {
 	struct client *c = (struct client *)userdata;
-#ifdef DEBUG
 	const unsigned char *alpn = NULL;
 	unsigned int alpnlen;
 
 	SSL_get0_alpn_selected(c->ssl, &alpn, &alpnlen);
-	fprintf(stdout, "Negotiated ALPN is %.*s\n", alpnlen, alpn);
-	fprintf(stdout, "Negotiated cipher suite is %s\n", SSL_get_cipher_name(c->ssl));
-#endif
+	if (c->config.verbose)
+	{
+		fprintf(stdout, "Negotiated ALPN is %.*s\n", alpnlen, alpn);
+		fprintf(stdout, "Negotiated cipher suite is %s\n", SSL_get_cipher_name(c->ssl));
+	}
 
 	ngtcp2_duration timeout;
 	const ngtcp2_transport_params *params;
@@ -1321,9 +1376,8 @@ int handle_handshake_completed(ngtcp2_conn *conn, void *userdata)
 		timeout = LOCAL_MAX_IDLE_TIMEOUT;
 	ngtcp2_conn_set_keep_alive_timeout(conn, timeout == UINT64_MAX ? UINT64_MAX : (timeout - 1) * NGTCP2_SECONDS);
 
-#ifdef DEBUG
-	fprintf(stdout, "quic: server max_idle_timeout: %ld, timeout: %ld\n", params->max_idle_timeout, timeout - 1);
-#endif
+	if (c->config.verbose)
+		fprintf(stdout, "quic: server max_idle_timeout: %ld, timeout: %ld\n", params->max_idle_timeout, timeout - 1);
 
 	if (setup_httpconn(userdata) == -1)
 	{
@@ -1331,7 +1385,7 @@ int handle_handshake_completed(ngtcp2_conn *conn, void *userdata)
 		return -1;
 	}
 
-	if (c->tp_file)
+	if (c->config.quic_transport_parameter_file)
 	{
 		uint8_t data[256];
 		ngtcp2_ssize datalen = ngtcp2_conn_encode_0rtt_transport_params(c->conn, data, 256);
@@ -1340,9 +1394,9 @@ int handle_handshake_completed(ngtcp2_conn *conn, void *userdata)
 			fprintf(stderr, "Could not encode 0-RTT transport parameters: %s\n", ngtcp2_strerror(datalen));
 			return -1;
 		}
-		else if (write_transport_params(c->tp_file, data, datalen) != 0)
+		else if (write_transport_params(c->config.quic_transport_parameter_file, data, datalen) != 0)
 		{
-			fprintf(stderr, "Could not write transport parameters in %s\n", c->tp_file);
+			fprintf(stderr, "Could not write transport parameters in %s\n", c->config.quic_transport_parameter_file);
 		}
 	}
 	return 0;
@@ -1559,11 +1613,11 @@ int client_quic_init(struct client *c,
 
 	ngtcp2_conn_set_tls_native_handle(c->conn, c->ssl);
 
-	if (c->early_data_enabled && c->tp_file)
+	if (c->early_data_enabled && c->config.quic_transport_parameter_file)
 	{
 		char *data;
 		long datalen;
-		if ((data = read_pem(c->tp_file, "transport parameters", "QUIC TRANSPORT PARAMETERS", &datalen)) == NULL)
+		if ((data = read_pem(c->config.quic_transport_parameter_file, "transport parameters", "QUIC TRANSPORT PARAMETERS", &datalen)) == NULL)
 		{
 			fprintf(stderr, "client quic init early data read pem failed\n");
 			c->early_data_enabled = 0;
@@ -1724,32 +1778,114 @@ int setup_sig(int epoll_fd)
 	return sig_fd;
 }
 
+int init_default_config(Config *config)
+{
+	config->check_cert = 1;
+	config->disable_early_data = 0;
+	config->verbose = 1;
+	config->ca_file = NULL;
+	config->private_key_file = NULL;
+	config->session_file = "quic_session.pem";
+	config->quic_transport_parameter_file = "quic_transport_parameter.pem";
+	return 0;
+}
+
+void print_usage()
+{
+	fprintf(stderr, "client [OPTIONS] HOST PORT\n");
+}
+
 int main(int argc, char *argv[])
 {
 	/* ./client HOST PORT CACERT */
-	if (argc != 4)
+	/**
+	 * $0 [options] HOST PORT
+	 * options:
+	 * --disable-early-data --ca --key -k(don't check cert) --help(-h help) --verbose(-v)
+	 */
+	Config config;
+	init_default_config(&config);
+
+	int longind, flag;
+	int res;
+	char *shortopts = "hvk";
+	struct option longopts[] = {
+		{.name = "help", .has_arg = no_argument, .flag = NULL, .val = 'h'},
+		{.name = "insecure", .has_arg = no_argument, .flag = NULL, .val = 'k'},
+		{.name = "verbose", .has_arg = no_argument, .flag = NULL, .val = 'v'},
+		{.name = "ca-file", .has_arg = required_argument, .flag = &flag, .val = 1},
+		{.name = "private-key-file", .has_arg = required_argument, .flag = &flag, .val = 2},
+		{.name = "disable-early-data", .has_arg = no_argument, .flag = &flag, .val = 3},
+		{.name = "session-file", .has_arg = required_argument, .flag = &flag, .val = 4},
+		{.name = "quic-tansport-parameter-file", .has_arg = required_argument, .flag = &flag, .val = 5},
+		{0, 0, 0, 0},
+	};
+	while (1)
 	{
-		fprintf(stderr, "./client HOST PORT CACERT\n");
+		res = getopt_long(argc, argv, shortopts, longopts, &longind);
+		if (res == -1) /* argument parse end */
+			break;
+		switch (res)
+		{
+		case 'h':
+			print_usage();
+			return 0;
+		case 'v':
+			config.verbose = 1;
+			break;
+		case 'k':
+			config.check_cert = 0;
+			break;
+		case 0:
+			if (flag == 1) /* ca path */
+				config.ca_file = optarg;
+			else if (flag == 2) /* ca key path */
+				config.private_key_file = optarg;
+			else if (flag == 3) /* disable-early-data */
+				config.disable_early_data = 1;
+			else if (flag == 4)
+				config.session_file = optarg;
+			else if (flag == 5)
+				config.quic_transport_parameter_file = optarg;
+			else
+			{
+				fprintf(stderr, "[ERROR] other flags\n");
+				print_usage();
+				return -1;
+			}
+			break;
+		default: /* ? : etc means error, print help info and exit */
+			fprintf(stderr, "[ERROR] ? or :\n");
+			print_usage();
+			return -1;
+		}
+	}
+	if (config.check_cert && !config.ca_file) /* 使用OpenSSL默认证书大概率会有问题，提醒用户提供证书 */
+	{
+		fprintf(stderr, "[WARNING] MAYBE should supply ca file when check server cert\n");
+	}
+	if (argc - optind < 2)
+	{
+		fprintf(stderr, "[ERROR] few argv\n");
+		print_usage();
 		return -1;
 	}
-	char *cafile = argv[3];
+	char *host = argv[optind++];
+	char *port = argv[optind++];
 	int epoll_fd = -1, timer_fd = -1, sock_fd = -1, sig_fd = -1;
 	struct sockaddr_storage local_addr, remote_addr;
 	size_t local_addrlen = sizeof(local_addr), remote_addrlen;
 	struct client c;
+	c.config = config;
 
 	c.ticket_received = 0;
 	c.early_data_enabled = 0;
-
-	c.disable_early_data = 0; /* 使用disable_early_data控制early data功能 */
-	c.session_file = "session.pem";
-	c.tp_file = "tp.pem";
 
 	ngtcp2_ccerr_default(&c.last_error);
 	c.stream.stream_id = -1;
 
 	sock_fd = resolve_and_connect(
-		argv[1], argv[2],
+		host, port,
 		(struct sockaddr *)&local_addr,
 		&local_addrlen,
 		(struct sockaddr *)&remote_addr,
@@ -1768,7 +1904,7 @@ int main(int argc, char *argv[])
 	c.httpconn = NULL;
 	c.handshake_confirmed = 0;
 
-	if (client_ssl_init(&c, argv[1], cafile) < 0)
+	if (client_ssl_init(&c, host, c.config.ca_file, c.config.private_key_file) < 0)
 	{
 		fprintf(stderr, "client_ssl_init失败\n");
 		return -1;

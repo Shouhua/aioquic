@@ -1,6 +1,62 @@
+## 2024-04-22
+### getopt(man 3 getopt)
+getopt用来处理程序options, 可以处理短格式(-)和长格式(--), 前者使用getopt函数, ；后者使用getopt_long函数处理, 她可以同时处理长格式和短格式。
+```c
+extern char *optarg;
+extern int optind, opterr, optopt;
+int getopt(int argc, char * const argv[], const char *optstring);
+int getopt_long(int argc, char * const argv[], const char *optstring, const struct option *longopts, int *longindex);
+struct option {
+	const char *name;
+	int has_arg; // no_argument(0), required_argument(1), optional_argument(2)
+	int *flag; // flag为
+	int val; 
+}
+```
+1. optstring类似`"ab:c::"`
+':'表示需要argument
+'::'表示argument是optional的, 但是**如果有argument, 那么option和arugument之间不能有空格**
+
+2. struct option需要使用使用空struct结尾；
+flag == NULL或者0, getopt_long返回val; 此时如果val为0, 则始终返回0；
+其他情况getopt_long返回0, 并且如果发现了long argument, flag会指向val, 否则没有发现的话, flag保持不变；比如：
+```c
+struct option long_options[] = 
+{
+     {.name="add", .has_arg=required_argument, .flag=0, .val=0},
+     {0, 0, 0, 0}
+}
+```
+
+3. longindex表示longopts数组里面的index, 库会填充。可以使用这个index获得struct option, 比如--add, longindex=0, 可以使用longopts[longindex]获取struct对象。
+
+4. `optind` is the index of the next element to be processed in argv。
+
+5. `extern char *optarg;` 如果option有argument, 那么optarg指向argument。
+
+6.  `extern int opterr;`, 默认情况下有两种错误情况
+     - 不存在的option
+     - missing argument
+默认情况库会打印错误, 并且返回'?'。设置`opterr=0`就不会打印库错误。根据返回值是否为'?'判断是否出现错误。
+
+### getopts (man 1 getopts)
+```bash
+# ./test.sh -a hello -c world
+OPTIND=1
+while getopts ":a:c:" name; do
+     case "${name}" in
+          a) echo "a: ${OPTARG}";;
+          c) echo "c: ${OPTARG}";;
+          ?) echo "?";;
+          :) echo ":";;
+          *) echo "others";;
+     esac
+done
+```
+
 ## 2024-04-17
 ### ngtcp2 Connection Migration代码流程
-`Connection Migration`主要使用变更port, 从9000变为9001。当使用输入`\m`后触发port change, 现实中可能是IP变化，总之会触发事件。
+`Connection Migration`主要使用变更port, 从9000变为9001。当使用输入`\m`后触发port change, 现实中可能是IP变化, 总之会触发事件。
 1. 重新生成并且绑定UDP socket
 ```c
 fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -10,12 +66,12 @@ getsockname(fd, (struct sockaddr *)&local, &local_len)
 ```
 2. ngtcp2提供了两种方式处理Connection Migration
      - nat rebinding
-这种使用了`void ngtcp2_conn_set_local_addr(ngtcp2_conn *conn, const ngtcp2_addr *addr)`, 而这个函数说只用于test。所以这种方法只是设置了local address为新的地址，仅此而已。
-     - 根据协议规定，发送`Path Challenge`，对端回复`Path Response`
+这种使用了`void ngtcp2_conn_set_local_addr(ngtcp2_conn *conn, const ngtcp2_addr *addr)`, 而这个函数说只用于test。所以这种方法只是设置了local address为新的地址, 仅此而已。
+     - 根据协议规定, 发送`Path Challenge`, 对端回复`Path Response`
 这种方式提供了两个接口
 `int ngtcp2_conn_initiate_immediate_migration(ngtcp2_conn *conn, const ngtcp2_path *path, ngtcp2_tstamp ts)`
 `int ngtcp2_conn_initiate_migration(ngtcp2_conn *conn, const ngtcp2_path *path, ngtcp2_tstamp ts)`
-两者都会发送`Path Challenge Frame`，但是前者不会等待server端的`Path Response`才迁移，后者是最严格的流程。
+两者都会发送`Path Challenge Frame`, 但是前者不会等待server端的`Path Response`才迁移, 后者是最严格的流程。
 ```c
 ngtcp2_addr addr;
 ngtcp2_addr_init(&addr, (struct sockaddr *)&local, local_len);
