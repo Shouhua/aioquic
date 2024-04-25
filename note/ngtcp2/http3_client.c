@@ -64,12 +64,13 @@ const char LOWER_XDIGITS[] = "0123456789abcdef";
 typedef enum
 {
 	INFO,
+	WARNING,
 	ERROR
 } Level;
 
 void print_debug(int level, const char *fmt, ...)
 {
-	char msgbuf[256];
+	char msgbuf[256] = {0};
 	va_list ap;
 
 	va_start(ap, fmt);
@@ -80,7 +81,9 @@ void print_debug(int level, const char *fmt, ...)
 		n = 256;
 	msgbuf[n++] = '\n';
 
-	fprintf(stderr, "[%s] %s", level == 0 ? "INFO" : "ERROR", msgbuf);
+	fprintf(stderr, "[%s] %s",
+			level == INFO ? "INFO" : (level == WARNING ? "WARNING" : "ERROR"),
+			msgbuf);
 }
 
 struct stream
@@ -100,6 +103,8 @@ typedef struct
 	char *private_key_file;
 	char *session_file;					 // 保存new session ticket信息的PEM文件，用于session resumption or 0-RTT
 	char *quic_transport_parameter_file; // save previous QUIC transprant parameters as PEM file, used for session resumption or 0-RTT
+	char *ciphers;
+	char *groups;
 } Config;
 
 struct client
@@ -648,7 +653,7 @@ int handle_migration(struct client *c)
 	socklen_t local_len;
 	if (getsockname(fd, (struct sockaddr *)&local, &local_len) == -1)
 	{
-		perror("migration getsockname failed");
+		print_debug(ERROR, "migration getsockname failed: %s", strerror(errno));
 		close(fd);
 		return -1;
 	}
@@ -890,12 +895,33 @@ int resolve_and_connect(const char *host, const char *port,
 
 int verify_callback(int preverify_ok, X509_STORE_CTX *x509_store_ctx)
 {
+	int ssl_ex_data_idx = SSL_get_ex_data_X509_STORE_CTX_idx();
+	SSL *ssl = X509_STORE_CTX_get_ex_data(x509_store_ctx, ssl_ex_data_idx);
+	ngtcp2_crypto_conn_ref *conn_ref = (ngtcp2_crypto_conn_ref *)(SSL_get_app_data(ssl));
+	struct client *c = (struct client *)(conn_ref->user_data);
+
+	int depth = X509_STORE_CTX_get_error_depth(x509_store_ctx);
+
+	X509 *current_cert = X509_STORE_CTX_get_current_cert(x509_store_ctx);
+	char buf[256];
+	X509_NAME *current_cert_subject = X509_get_subject_name(current_cert);
+	X509_NAME_oneline(current_cert_subject, buf, 256);
+
+	/* preverify_ok = 1 表示现在这个证书及前面证书链没有错误 */
 	int error_code = preverify_ok ? X509_V_OK : X509_STORE_CTX_get_error(x509_store_ctx);
 	if (error_code != X509_V_OK)
 	{
 		const char *error_string = X509_verify_cert_error_string(error_code);
-		fprintf(stdout, "verify_callback失败: %s\n", error_string);
+		print_debug(ERROR, "verify_callback失败: %s", error_string);
 	}
+
+	if (c->config.verbose)
+		print_debug(INFO, "depth: %d, preverify_ok: %d, error_code: %d, error_string: %s, \n\tcert subject name: %s",
+					depth,
+					preverify_ok,
+					error_code,
+					X509_verify_cert_error_string(error_code),
+					buf);
 	return preverify_ok;
 }
 
@@ -1003,8 +1029,10 @@ int client_ssl_init(struct client *c, char *host, const char *cafile, const char
 	}
 	else
 	{
-		err = SSL_CTX_set_default_verify_paths(c->ssl_ctx);
-		if (err == 0)
+		err = SSL_CTX_load_verify_locations(c->ssl_ctx, NULL, "/etc/ssl/certs");
+		// TODO: 这个真的不懂了，按道理是应该下面的可以的，为什么需要手动添加呢？
+		// err = SSL_CTX_set_default_verify_paths(c->ssl_ctx);
+		if (err <= 0)
 		{
 			fprintf(stderr, "Could not load trusted certificates: %s\n", ERR_error_string(ERR_get_error(), NULL));
 			return -1;
@@ -1013,18 +1041,11 @@ int client_ssl_init(struct client *c, char *host, const char *cafile, const char
 
 	if (c->config.check_cert)
 	{
-		SSL_CTX_set_verify(c->ssl_ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL); // 证书校验
+		SSL_CTX_set_verify(c->ssl_ctx, SSL_VERIFY_PEER, verify_callback); // 证书校验
 	}
 	else
 	{
 		SSL_CTX_set_verify(c->ssl_ctx, SSL_VERIFY_NONE, NULL); // 不校验证书
-	}
-	SSL_CTX_set_mode(c->ssl_ctx, SSL_MODE_AUTO_RETRY);
-
-	if (ngtcp2_crypto_quictls_configure_client_context(c->ssl_ctx) != 0)
-	{
-		fprintf(stderr, "ngtcp2_crypto_quictls_configure_client_context failed\n");
-		return -1;
 	}
 
 	if (!c->config.disable_early_data && c->config.session_file)
@@ -1032,6 +1053,24 @@ int client_ssl_init(struct client *c, char *host, const char *cafile, const char
 		// session stored externally by hand in callback function
 		SSL_CTX_set_session_cache_mode(c->ssl_ctx, SSL_SESS_CACHE_CLIENT | SSL_SESS_CACHE_NO_INTERNAL);
 		SSL_CTX_sess_set_new_cb(c->ssl_ctx, new_session_cb);
+	}
+
+	if (c->config.ciphers && SSL_CTX_set_ciphersuites(c->ssl_ctx, c->config.ciphers) != 1)
+	{
+		print_debug(ERROR, "SSL_CTX_set_ciphersuites: %s", ERR_error_string(ERR_get_error(), NULL));
+		return -1;
+	}
+
+	if (c->config.groups && SSL_CTX_set1_groups_list(c->ssl_ctx, c->config.groups) != 1)
+	{
+		print_debug(ERROR, "SSL_CTX_set1_groups_list failed");
+		return -1;
+	}
+
+	if (ngtcp2_crypto_quictls_configure_client_context(c->ssl_ctx) != 0)
+	{
+		fprintf(stderr, "ngtcp2_crypto_quictls_configure_client_context failed\n");
+		return -1;
 	}
 
 	c->ssl = SSL_new(c->ssl_ctx);
@@ -1065,12 +1104,15 @@ int client_ssl_init(struct client *c, char *host, const char *cafile, const char
 	SSL_set_quic_transport_version(c->ssl, TLSEXT_TYPE_quic_transport_parameters);
 
 	char *keylogfile = getenv("SSLKEYLOGFILE");
-	SSL_CTX_set_keylog_callback(c->ssl_ctx, keylog_callback);
-	ssl_userdata_idx = SSL_get_ex_new_index(0, NULL, NULL, NULL, NULL);
-	if (SSL_set_ex_data(c->ssl, ssl_userdata_idx, keylogfile) == 0)
+	if (keylogfile)
 	{
-		fprintf(stderr, "SSL_set_ex_data failed\n");
-		return -1;
+		SSL_CTX_set_keylog_callback(c->ssl_ctx, keylog_callback);
+		ssl_userdata_idx = SSL_get_ex_new_index(0, NULL, NULL, NULL, NULL);
+		if (SSL_set_ex_data(c->ssl, ssl_userdata_idx, keylogfile) == 0)
+		{
+			fprintf(stderr, "SSL_set_ex_data failed\n");
+			return -1;
+		}
 	}
 
 	if (!c->config.disable_early_data && c->config.session_file) /* 只有使用early data时才设置session, 如果做session resumption可以放开 */
@@ -1179,7 +1221,7 @@ int recv_stream_data_cb(ngtcp2_conn *conn __attribute__((unused)),
 
 void print_http_data(int64_t stream_id, const uint8_t *data __attribute__((unused)), size_t datalen)
 {
-	fprintf(stdout, "http: stream 0x%ld body %zu bytes\n", stream_id, datalen);
+	print_debug(INFO, "http: stream 0x%ld body %zu bytes", stream_id, datalen);
 	hexdump(stdout, data, datalen);
 }
 
@@ -1197,7 +1239,7 @@ int http_recv_data(nghttp3_conn *conn __attribute__((unused)), int64_t stream_id
 int http_begin_headers(nghttp3_conn *conn __attribute__((unused)), int64_t stream_id, void *user_data __attribute__((unused)),
 					   void *stream_user_data __attribute__((unused)))
 {
-	fprintf(stdout, "http: stream 0x%ld response headers started\n", stream_id);
+	print_debug(INFO, "http: stream 0x%ld response headers started", stream_id);
 	return 0;
 }
 
@@ -1222,7 +1264,7 @@ int http_recv_header(nghttp3_conn *conn __attribute__((unused)), int64_t stream_
 int http_end_headers(nghttp3_conn *conn __attribute__((unused)), int64_t stream_id, int fin __attribute__((unused)),
 					 void *user_data __attribute__((unused)), void *stream_user_data __attribute__((unused)))
 {
-	fprintf(stdout, "http: stream 0x%ld headers ended\n", stream_id);
+	print_debug(INFO, "http: stream 0x%ld headers ended", stream_id);
 	return 0;
 }
 
@@ -1239,16 +1281,16 @@ int http_deferred_consume(nghttp3_conn *conn __attribute__((unused)), int64_t st
 int http_recv_settings(nghttp3_conn *conn __attribute__((unused)), const nghttp3_settings *settings,
 					   void *conn_user_data __attribute__((unused)))
 {
-	fprintf(stdout,
-			"http: remote settings\n"
-			"http: SETTINGS_MAX_FIELD_SECTION_SIZE=%ld\n"
-			"http: SETTINGS_QPACK_MAX_TABLE_CAPACITY=%zu\n"
-			"http: SETTINGS_QPACK_BLOCKED_STREAMS=%zu\n"
-			"http: SETTINGS_ENABLE_CONNECT_PROTOCOL=%d\n"
-			"http: SETTINGS_H3_DATAGRAM=%d\n",
-			settings->max_field_section_size, settings->qpack_max_dtable_capacity,
-			settings->qpack_blocked_streams, settings->enable_connect_protocol,
-			settings->h3_datagram);
+	print_debug(INFO,
+				"http: remote settings\n"
+				"http: SETTINGS_MAX_FIELD_SECTION_SIZE=%ld\n"
+				"http: SETTINGS_QPACK_MAX_TABLE_CAPACITY=%zu\n"
+				"http: SETTINGS_QPACK_BLOCKED_STREAMS=%zu\n"
+				"http: SETTINGS_ENABLE_CONNECT_PROTOCOL=%d\n"
+				"http: SETTINGS_H3_DATAGRAM=%d\n",
+				settings->max_field_section_size, settings->qpack_max_dtable_capacity,
+				settings->qpack_blocked_streams, settings->enable_connect_protocol,
+				settings->h3_datagram);
 	return 0;
 }
 
@@ -1303,7 +1345,7 @@ int setup_httpconn(struct client *c)
 	}
 
 	if (c->config.verbose)
-		fprintf(stderr, "http: control stream=%ld\n", ctrl_stream_id);
+		print_debug(INFO, "http: control stream=%ld", ctrl_stream_id);
 
 	int64_t qpack_enc_stream_id, qpack_dec_stream_id;
 
@@ -1326,7 +1368,7 @@ int setup_httpconn(struct client *c)
 	}
 
 	if (c->config.verbose)
-		fprintf(stdout, "http: QPACK streams encoder=%ld decoder=%ld\n", qpack_enc_stream_id, qpack_dec_stream_id);
+		print_debug(INFO, "http: QPACK streams encoder=%ld decoder=%ld", qpack_enc_stream_id, qpack_dec_stream_id);
 	return 0;
 }
 
@@ -1358,8 +1400,10 @@ int handle_handshake_completed(ngtcp2_conn *conn, void *userdata)
 	SSL_get0_alpn_selected(c->ssl, &alpn, &alpnlen);
 	if (c->config.verbose)
 	{
-		fprintf(stdout, "Negotiated ALPN is %.*s\n", alpnlen, alpn);
-		fprintf(stdout, "Negotiated cipher suite is %s\n", SSL_get_cipher_name(c->ssl));
+		print_debug(INFO, "Negotiated ALPN is %.*s", alpnlen, alpn);
+		print_debug(INFO, "Negotiated cipher suite is %s", SSL_get_cipher_name(c->ssl));
+		int group_nid = SSL_get_negotiated_group(c->ssl);
+		print_debug(INFO, "Negotiated group is %s", group_nid == NID_undef ? "NULL" : OBJ_nid2ln(group_nid));
 	}
 
 	ngtcp2_duration timeout;
@@ -1377,7 +1421,7 @@ int handle_handshake_completed(ngtcp2_conn *conn, void *userdata)
 	ngtcp2_conn_set_keep_alive_timeout(conn, timeout == UINT64_MAX ? UINT64_MAX : (timeout - 1) * NGTCP2_SECONDS);
 
 	if (c->config.verbose)
-		fprintf(stdout, "quic: server max_idle_timeout: %ld, timeout: %ld\n", params->max_idle_timeout, timeout - 1);
+		print_debug(INFO, "quic: server max_idle_timeout: %ld, timeout: %ld", params->max_idle_timeout, timeout - 1);
 
 	if (setup_httpconn(userdata) == -1)
 	{
@@ -1422,10 +1466,12 @@ int handshake_confirmed(ngtcp2_conn *conn, void *user_data)
 	// start delay stream timer
 	char ip[INET_ADDRSTRLEN];
 	uint16_t port;
+	char buf[128];
 	get_ip_port(&c->local_addr, ip, &port);
-	fprintf(stdout, "Now Client(%s, %d)", ip, port);
+	sprintf(buf, "now CLIENT (%s, %d) connected to ", ip, port);
 	get_ip_port(&c->remote_addr, ip, &port);
-	fprintf(stdout, " connected to Server(%s, %d)\n", ip, port);
+	sprintf(buf + strlen(buf), "SERVER (%s, %d)", ip, port);
+	print_debug(INFO, "%s", buf);
 	return 0;
 }
 
@@ -1465,19 +1511,22 @@ int path_validation(ngtcp2_conn *conn, uint32_t flags, const ngtcp2_path *path,
 	(void)conn;
 	char ip[INET_ADDRSTRLEN];
 	uint16_t port;
+	char buf[128];
+
 	get_ip_port((struct sockaddr_storage *)(path->local.addr), ip, &port);
-	fprintf(stdout, "Path validation against path { new local: %s:%d", ip, port);
+	sprintf(buf, "Path validation against path { new local: %s:%d", ip, port);
 	if (old_path)
 	{
 		get_ip_port((struct sockaddr_storage *)(old_path->local.addr), ip, &port);
-		fprintf(stdout, ", old local: %s:%d", ip, port);
+		sprintf(buf + strlen(buf), ", old local: %s:%d", ip, port);
 	}
 	get_ip_port((struct sockaddr_storage *)(path->remote.addr), ip, &port);
-	fprintf(stdout, ", remote: %s:%d } %s\n", ip, port, res == NGTCP2_PATH_VALIDATION_RESULT_SUCCESS ? "succeeded" : "failed");
+	sprintf(buf + strlen(buf), ", remote: %s:%d } %s", ip, port, res == NGTCP2_PATH_VALIDATION_RESULT_SUCCESS ? "succeeded" : "failed");
+	print_debug(INFO, "%s", buf);
 
 	if (flags & NGTCP2_PATH_VALIDATION_FLAG_PREFERRED_ADDR)
 	{
-		fprintf(stdout, "NGTCP2_PATH_VALIDATION_FLAG_PREFERRED_ADDR");
+		print_debug(WARNING, "NGTCP2_PATH_VALIDATION_FLAG_PREFERRED_ADDR");
 		struct client *c = (struct client *)(user_data);
 		memcpy(&c->remote_addr, path->remote.addr, path->remote.addrlen);
 		c->remote_addrlen = path->remote.addrlen;
@@ -1611,6 +1660,8 @@ int client_quic_init(struct client *c,
 		return -1;
 	}
 
+	assert(c->conn);
+	assert(c->ssl);
 	ngtcp2_conn_set_tls_native_handle(c->conn, c->ssl);
 
 	if (c->early_data_enabled && c->config.quic_transport_parameter_file)
@@ -1787,6 +1838,8 @@ int init_default_config(Config *config)
 	config->private_key_file = NULL;
 	config->session_file = "quic_session.pem";
 	config->quic_transport_parameter_file = "quic_transport_parameter.pem";
+	config->ciphers = NULL;
+	config->groups = NULL;
 	return 0;
 }
 
@@ -1818,6 +1871,12 @@ int main(int argc, char *argv[])
 		{.name = "disable-early-data", .has_arg = no_argument, .flag = &flag, .val = 3},
 		{.name = "session-file", .has_arg = required_argument, .flag = &flag, .val = 4},
 		{.name = "quic-tansport-parameter-file", .has_arg = required_argument, .flag = &flag, .val = 5},
+		/* ciphers="TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_CCM_SHA256:TLS_AES_128_CCM_8_SHA256" */
+		/* https://datatracker.ietf.org/doc/html/rfc8446#appendix-B.4 */
+		{.name = "ciphers", .has_arg = required_argument, .flag = &flag, .val = 6},
+		/* TLSv1.3 groups="P-256:P-384:P-521:X25519:X448:ffdhe2048:ffdhe3072:ffdhe4096:ffdhe6144:ffdhe8192" etc (https://www.openssl.org/docs/manmaster/man3/SSL_CTX_set1_groups_list.html)*/
+		/* TLSv1.3 groups参考文档 https://datatracker.ietf.org/doc/html/rfc8446#section-4.2.7 */
+		{.name = "groups", .has_arg = required_argument, .flag = &flag, .val = 7},
 		{0, 0, 0, 0},
 	};
 	while (1)
@@ -1847,6 +1906,10 @@ int main(int argc, char *argv[])
 				config.session_file = optarg;
 			else if (flag == 5)
 				config.quic_transport_parameter_file = optarg;
+			else if (flag == 6) /* ciphers */
+				config.ciphers = optarg;
+			else if (flag == 7) /* groups */
+				config.groups = optarg;
 			else
 			{
 				fprintf(stderr, "[ERROR] other flags\n");
@@ -1859,10 +1922,6 @@ int main(int argc, char *argv[])
 			print_usage();
 			return -1;
 		}
-	}
-	if (config.check_cert && !config.ca_file) /* 使用OpenSSL默认证书大概率会有问题，提醒用户提供证书 */
-	{
-		fprintf(stderr, "[WARNING] MAYBE should supply ca file when check server cert\n");
 	}
 	if (argc - optind < 2)
 	{
@@ -1903,6 +1962,9 @@ int main(int argc, char *argv[])
 	c.remote_addrlen = remote_addrlen;
 	c.httpconn = NULL;
 	c.handshake_confirmed = 0;
+
+	c.ssl_ctx = NULL;
+	c.ssl = NULL;
 
 	if (client_ssl_init(&c, host, c.config.ca_file, c.config.private_key_file) < 0)
 	{

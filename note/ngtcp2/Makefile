@@ -35,10 +35,20 @@ debug_quic: client
 	gdb --args ./build/client $${REMOTE_IP} 8443  "/home/shouhua/project/aioquic/note/ngtcp2/ca_cert.pem"
 
 run_http3: http3_client
-	@SSLKEYLOGFILE=keylog.txt ./build/http3_client --ca-file ca_ert.pem --private-key-file ca_key.pem $$REMOTE_IP 443
+	@SSLKEYLOGFILE=keylog.txt ./build/http3_client \
+		--ca-file "/home/shouhua/project/aioquic/note/ngtcp2/ca_cert.pem" \
+		--private-key-file "/home/shouhua/project/aioquic/note/ngtcp2/ca_key.pem"  \
+		$$REMOTE_IP 443
 
 debug_http3: http3_client
-	gdb --args ./build/http3_client --ca-file ca_ert.pem --private-key-file ca_key.pem $${REMOTE_IP} 443
+	gdb --args ./build/http3_client \
+		--ca-file "/home/shouhua/project/aioquic/note/ngtcp2/ca_cert.pem" \
+		--private-key-file "/home/shouhua/project/aioquic/note/ngtcp2/ca_key.pem"  \
+		$$REMOTE_IP 443
+debug_http3_example_org: http3_client
+	gdb --args ./build/http3_client \
+		--disable-early-data \
+		"www.example.org" 443
 
 clean: 
 	rm -rfv build

@@ -1,3 +1,53 @@
+## 2024-04-24
+### OpenSSL certificate verification(Demystifying Cryptography with OpenSSL 3.0(page 195))
+#### 加载证书
+```c
+ #include <openssl/ssl.h>
+
+int SSL_CTX_load_verify_dir(SSL_CTX *ctx, const char *CApath);
+int SSL_CTX_load_verify_file(SSL_CTX *ctx, const char *CAfile);
+int SSL_CTX_load_verify_store(SSL_CTX *ctx, const char *CAstore);
+
+int SSL_CTX_set_default_verify_paths(SSL_CTX *ctx);
+
+int SSL_CTX_set_default_verify_dir(SSL_CTX *ctx);
+int SSL_CTX_set_default_verify_file(SSL_CTX *ctx);
+int SSL_CTX_set_default_verify_store(SSL_CTX *ctx);
+
+int SSL_CTX_load_verify_locations(SSL_CTX *ctx, const char *CAfile,
+                                   const char *CApath);
+```
+其中, 第四个和最后一个用的比较多, 当有self-signed的证书需要加载的时候, 使用最后一个；当使用连接公共的网络时, 比如`https://www.example.org:443`, 可以使用第四个, 加载默认的目录(`/usr/lib/ssl/certs -> /etc/ssl/certs`)。  
+但是实际使用中http3_client.c使用默认目录时会报错`unable to get local issuer certificate`, 所以最后还是使用显示加载默认目录方式。
+```c
+SSL_CTX_load_verify_locations(ssl_ctx, NULL, "/etc/ssl/certs");
+```
+
+#### 自定义certificates verification
+```c
+void SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, verfify_callback);
+void SSL_set_verify(ctx, SSL_VERIFY_PEER, verfify_callback);
+
+// preverify_ok = 0 error; = 1 ok;
+// callback函数返回1表示正确, 返回0表示验证失败, TLS会发送alert信息给对方
+int SSL_verfify_cb(int preverify_ok, X509_STORE_CTX *x509_store_ctx);
+```
+1. 一个pem文件可以包含整个证书链, 其中最上面的是peer certificate, 接着是issuer, 直至root ca。
+2. OpenSSL中有certificate depth的概念, 与上述一致, peer certificate为0, 依次增加。可以手动限制depth。
+```c
+void SSL_CTX_set_verify_depth(SSL_CTX *ctx, int depth);
+void SSL_set_verify_depth(SSL *ssl, int depth);
+```
+3. SSL_verfiy_cb这个callback会被反向顺序依次调用, 比如先root ca, 接着是intermediate certificates, 最后是peer certificate。
+4. x509_store_ctx包含目前check过的证书链信息
+```c
+// 当前证书信息
+X509_STORE_CTX_get_current_cert();
+// 当前证书depth
+X509_STORE_CTX_get_error_depth();
+```
+5. 如果一个证书有多个错误时, 会调用`SSL_verfify_cb`多次。同样如果这次有错误, 但是正确返回了, 下次调用时`X509_STORE_CTX_get_error()`还是会返回上次的错误信息。
+
 ## 2024-04-22
 ### getopt(man 3 getopt)
 getopt用来处理程序options, 可以处理短格式(-)和长格式(--), 前者使用getopt函数, ；后者使用getopt_long函数处理, 她可以同时处理长格式和短格式。
