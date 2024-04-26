@@ -956,6 +956,7 @@ gcc编译时手动指定-L, 并且在运行时指定rpath(可以通过readelf查
 ### QUIC中使用的tls1.3不同点
 1. tls中处理的是headshake header和payload, 没有原先的record, 取而代之是quic long/short header
 2. 传入client initial header中的dcid作为初始key计算, 后面tls层计算除各种加解密的对称密钥封装
+3. key update机制不一样，QUIC使用它`Key Phase bit` toggle来通知peer，TLS1.3使用`Key Update`消息通知
 
 ### Ubuntu中history多个ssh终端无法共享
 ```shell

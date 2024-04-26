@@ -11,8 +11,8 @@
 	// settings.qpack_blocked_streams = 100;
  * 2. connection migration DONE
  * 3. early data 0-RTT DONE
- * 4. gracefully closed
-	TODO: 后面server搭建时调试添加
+ * 4. getopts for keyupdate, ciphers, groups etc DONE
+ * 5. keyupdate DONE
  */
 #include <arpa/inet.h>
 #include <assert.h>
@@ -47,6 +47,7 @@
 
 #define MAX_EVENTS 64
 #define MAX_BUFFER 1280
+#define PRINT_BUF 512
 
 #define SOURCE_PORT 9000
 #define MIGRATION_PORT 9001
@@ -70,15 +71,16 @@ typedef enum
 
 void print_debug(int level, const char *fmt, ...)
 {
-	char msgbuf[256] = {0};
+	char msgbuf[PRINT_BUF];
+	memset(msgbuf, 0, PRINT_BUF);
 	va_list ap;
 
 	va_start(ap, fmt);
-	int n = vsnprintf(msgbuf, 256, fmt, ap);
+	int n = vsnprintf(msgbuf, PRINT_BUF, fmt, ap);
 	va_end(ap);
 
-	if (n > 256)
-		n = 256;
+	if (n > PRINT_BUF)
+		n = PRINT_BUF;
 	msgbuf[n++] = '\n';
 
 	fprintf(stderr, "[%s] %s",
@@ -105,6 +107,7 @@ typedef struct
 	char *quic_transport_parameter_file; // save previous QUIC transprant parameters as PEM file, used for session resumption or 0-RTT
 	char *ciphers;
 	char *groups;
+	int show_secret;
 } Config;
 
 struct client
@@ -124,6 +127,9 @@ struct client
 
 	/* nghttp3 related */
 	nghttp3_conn *httpconn;
+
+	/* key update counter */
+	int nkey_update;
 
 	/* Session Resumption or 0-RTT */
 	int early_data_enabled;
@@ -611,10 +617,26 @@ int submit_http_request(struct client *c)
 	};
 	size_t nvlen = sizeof(nva) / sizeof(nghttp3_nv);
 
-	res = nghttp3_conn_submit_request(c->httpconn, stream_id, nva, nvlen, NULL, NULL);
+	res = nghttp3_conn_submit_request(c->httpconn, stream_id, nva, nvlen, NULL, c);
 	if (res != 0)
 	{
 		fprintf(stderr, "nghttp3_conn_submit_request failed: %s\n", nghttp3_strerror(res));
+		return -1;
+	}
+	return 0;
+}
+
+int handle_keyupdate(struct client *c)
+{
+	int res;
+	if (c->config.verbose)
+	{
+		print_debug(INFO, "Initiate key update");
+	}
+
+	if ((res = ngtcp2_conn_initiate_key_update(c->conn, timestamp())) != 0)
+	{
+		print_debug(ERROR, "ngtcp2_conn_initiate_key_update: %s(The previous key update has not been confirmed yet; or key update is too frequent; or new keys are not available yet.)", ngtcp2_strerror(res));
 		return -1;
 	}
 	return 0;
@@ -714,8 +736,9 @@ int handle_migration(struct client *c)
 }
 
 /**
- * \x exit
+ * \q exit
  * \m migration from port 9000 to 9001
+ * \k key update manually
  */
 int handle_stdin(struct client *c)
 {
@@ -747,7 +770,7 @@ int handle_stdin(struct client *c)
 		return -1;
 	}
 
-	if (strncmp(buf, "\\x", 2) == 0)
+	if (strncmp(buf, "\\q", 2) == 0)
 	{
 		connection_close(c);
 		connection_free(c);
@@ -757,6 +780,11 @@ int handle_stdin(struct client *c)
 	if (strncmp(buf, "\\m", 2) == 0)
 	{
 		return handle_migration(c);
+	}
+
+	if (strncmp(buf, "\\k", 2) == 0)
+	{
+		return handle_keyupdate(c);
 	}
 
 	if (submit_http_request(c) == -1)
@@ -895,6 +923,11 @@ int resolve_and_connect(const char *host, const char *port,
 
 int verify_callback(int preverify_ok, X509_STORE_CTX *x509_store_ctx)
 {
+	char *issuer_name;
+	X509 *current_cert;
+	X509_NAME *current_cert_subject;
+	X509_NAME *current_cert_issuer;
+
 	int ssl_ex_data_idx = SSL_get_ex_data_X509_STORE_CTX_idx();
 	SSL *ssl = X509_STORE_CTX_get_ex_data(x509_store_ctx, ssl_ex_data_idx);
 	ngtcp2_crypto_conn_ref *conn_ref = (ngtcp2_crypto_conn_ref *)(SSL_get_app_data(ssl));
@@ -902,10 +935,16 @@ int verify_callback(int preverify_ok, X509_STORE_CTX *x509_store_ctx)
 
 	int depth = X509_STORE_CTX_get_error_depth(x509_store_ctx);
 
-	X509 *current_cert = X509_STORE_CTX_get_current_cert(x509_store_ctx);
+	current_cert = X509_STORE_CTX_get_current_cert(x509_store_ctx);
 	char buf[256];
-	X509_NAME *current_cert_subject = X509_get_subject_name(current_cert);
+	current_cert_subject = X509_get_subject_name(current_cert);
 	X509_NAME_oneline(current_cert_subject, buf, 256);
+
+	current_cert_issuer = X509_get_issuer_name(current_cert);
+	if (current_cert_issuer)
+	{
+		issuer_name = X509_NAME_oneline(current_cert_issuer, NULL, 0);
+	}
 
 	/* preverify_ok = 1 表示现在这个证书及前面证书链没有错误 */
 	int error_code = preverify_ok ? X509_V_OK : X509_STORE_CTX_get_error(x509_store_ctx);
@@ -916,12 +955,17 @@ int verify_callback(int preverify_ok, X509_STORE_CTX *x509_store_ctx)
 	}
 
 	if (c->config.verbose)
-		print_debug(INFO, "depth: %d, preverify_ok: %d, error_code: %d, error_string: %s, \n\tcert subject name: %s",
+	{
+		print_debug(INFO, "depth: %d, preverify_ok: %d, error_code: %d, error_string: %s, \n\tcert subject: %s\n\tcert issuer: %s",
 					depth,
 					preverify_ok,
 					error_code,
 					X509_verify_cert_error_string(error_code),
-					buf);
+					buf,
+					issuer_name);
+	}
+
+	OPENSSL_free(issuer_name);
 	return preverify_ok;
 }
 
@@ -1237,9 +1281,11 @@ int http_recv_data(nghttp3_conn *conn __attribute__((unused)), int64_t stream_id
 }
 
 int http_begin_headers(nghttp3_conn *conn __attribute__((unused)), int64_t stream_id, void *user_data __attribute__((unused)),
-					   void *stream_user_data __attribute__((unused)))
+					   void *stream_user_data)
 {
-	print_debug(INFO, "http: stream 0x%ld response headers started", stream_id);
+	struct client *c = (struct client *)stream_user_data;
+	if (c->config.verbose)
+		print_debug(INFO, "http: stream 0x%ld response headers started", stream_id);
 	return 0;
 }
 
@@ -1255,16 +1301,48 @@ void print_http_header(const nghttp3_rcbuf *name, const nghttp3_rcbuf *value,
 
 int http_recv_header(nghttp3_conn *conn __attribute__((unused)), int64_t stream_id __attribute__((unused)), int32_t token __attribute__((unused)),
 					 nghttp3_rcbuf *name __attribute__((unused)), nghttp3_rcbuf *value __attribute__((unused)), uint8_t flags __attribute__((unused)),
-					 void *user_data __attribute__((unused)), void *stream_user_data __attribute__((unused)))
+					 void *user_data, void *stream_user_data __attribute__((unused)))
 {
-	print_http_header(name, value, flags);
+	struct client *c = (struct client *)user_data;
+	if (c->config.verbose)
+		print_http_header(name, value, flags);
 	return 0;
 }
 
 int http_end_headers(nghttp3_conn *conn __attribute__((unused)), int64_t stream_id, int fin __attribute__((unused)),
-					 void *user_data __attribute__((unused)), void *stream_user_data __attribute__((unused)))
+					 void *user_data, void *stream_user_data __attribute__((unused)))
 {
-	print_debug(INFO, "http: stream 0x%ld headers ended", stream_id);
+	struct client *c = (struct client *)user_data;
+	if (c->config.verbose)
+		print_debug(INFO, "http: stream 0x%ld response headers ended", stream_id);
+	return 0;
+}
+
+int http_begin_trailers(nghttp3_conn *conn __attribute__((unused)), int64_t stream_id, void *user_data,
+						void *stream_user_data __attribute__((unused)))
+{
+	struct client *c = (struct client *)user_data;
+	if (c->config.verbose)
+		print_debug(INFO, "http: stream 0x%ld trailers started", stream_id);
+	return 0;
+}
+
+int http_recv_trailer(nghttp3_conn *conn __attribute__((unused)), int64_t stream_id __attribute__((unused)), int32_t token __attribute__((unused)),
+					  nghttp3_rcbuf *name, nghttp3_rcbuf *value, uint8_t flags,
+					  void *user_data, void *stream_user_data __attribute__((unused)))
+{
+	struct client *c = (struct client *)user_data;
+	if (c->config.verbose)
+		print_http_header(name, value, flags);
+	return 0;
+}
+
+int http_end_trailers(nghttp3_conn *conn __attribute__((unused)), int64_t stream_id, int fin __attribute__((unused)),
+					  void *user_data, void *stream_user_data __attribute__((unused)))
+{
+	struct client *c = (struct client *)user_data;
+	if (c->config.verbose)
+		print_debug(INFO, "http: stream 0x%ld trailers ended", stream_id);
 	return 0;
 }
 
@@ -1308,13 +1386,13 @@ int setup_httpconn(struct client *c)
 		NULL, // acked_stream_data
 		NULL, // http_stream_close,
 		http_recv_data,
-		http_deferred_consume, // http_deferred_consume,
+		http_deferred_consume,
 		http_begin_headers,
 		http_recv_header,
 		http_end_headers,
-		NULL, // http_begin_trailers,
-		NULL, // http_recv_trailer,
-		NULL, // http_end_trailers,
+		http_begin_trailers,
+		http_recv_trailer,
+		http_end_trailers,
 		NULL, // http_stop_sending,
 		NULL, // end_stream
 		NULL, // http_reset_stream,
@@ -1468,9 +1546,9 @@ int handshake_confirmed(ngtcp2_conn *conn, void *user_data)
 	uint16_t port;
 	char buf[128];
 	get_ip_port(&c->local_addr, ip, &port);
-	sprintf(buf, "now CLIENT (%s, %d) connected to ", ip, port);
+	sprintf(buf, "now CLIENT(%s, %d) connected to ", ip, port);
 	get_ip_port(&c->remote_addr, ip, &port);
-	sprintf(buf + strlen(buf), "SERVER (%s, %d)", ip, port);
+	sprintf(buf + strlen(buf), "SERVER(%s, %d)", ip, port);
 	print_debug(INFO, "%s", buf);
 	return 0;
 }
@@ -1580,6 +1658,67 @@ int make_stream_early(struct client *c)
 	return submit_http_request(c);
 }
 
+void print_secret(const uint8_t *secret, size_t secret_len, const uint8_t *key, size_t key_len, const uint8_t *iv, size_t iv_len)
+{
+	size_t i;
+	fprintf(stdout, "\tsecret: ");
+	for (i = 0; i < secret_len; i++)
+	{
+		fprintf(stdout, "%02x", secret[i]);
+	}
+	fprintf(stdout, "\n");
+	fprintf(stdout, "\tkey: ");
+	for (i = 0; i < key_len; i++)
+	{
+		fprintf(stdout, "%02x", key[i]);
+	}
+	fprintf(stdout, "\n");
+	fprintf(stdout, "\tiv: ");
+	for (i = 0; i < iv_len; i++)
+	{
+		fprintf(stdout, "%02x", iv[i]);
+	}
+	fprintf(stdout, "\n");
+}
+
+int update_key(
+	ngtcp2_conn *conn __attribute__((unused)), uint8_t *rx_secret, uint8_t *tx_secret,
+	ngtcp2_crypto_aead_ctx *rx_aead_ctx, uint8_t *rx_iv,
+	ngtcp2_crypto_aead_ctx *tx_aead_ctx, uint8_t *tx_iv,
+	const uint8_t *current_rx_secret, const uint8_t *current_tx_secret,
+	size_t secretlen, void *user_data)
+{
+	struct client *c = (struct client *)user_data;
+	if (c->config.verbose)
+	{
+		print_debug(INFO, "Updating traffic key");
+	}
+	const ngtcp2_crypto_ctx *crypto_ctx = ngtcp2_conn_get_crypto_ctx(c->conn);
+	const ngtcp2_crypto_aead *aead = &(crypto_ctx->aead);
+	int keylen = ngtcp2_crypto_aead_keylen(aead);
+	int ivlen = ngtcp2_crypto_packet_protection_ivlen(aead);
+
+	c->nkey_update++; /* -> 和 ++ 具有相同的precedense */
+
+	uint8_t rx_key[64], tx_key[64];
+	if (ngtcp2_crypto_update_key(c->conn, rx_secret, tx_secret, rx_aead_ctx,
+								 rx_key, rx_iv, tx_aead_ctx, tx_key, tx_iv, current_rx_secret, current_tx_secret, secretlen) != 0)
+	{
+		print_debug(ERROR, "ngtcp2_crypto_update_key failed");
+		return -1;
+	}
+
+	if (c->config.verbose && c->config.show_secret)
+	{
+		print_debug(INFO, "application traffic rx secret: %d", c->nkey_update);
+		print_secret(rx_secret, secretlen, rx_key, keylen, rx_iv, ivlen);
+		print_debug(INFO, "application traffic tx secret: %d", c->nkey_update);
+		print_secret(tx_secret, secretlen, tx_key, keylen, tx_iv, ivlen);
+	}
+
+	return 0;
+}
+
 int client_quic_init(struct client *c,
 					 struct sockaddr *remote_addr,
 					 socklen_t remote_addrlen,
@@ -1605,11 +1744,11 @@ int client_quic_init(struct client *c,
 		.decrypt = ngtcp2_crypto_decrypt_cb,
 		.hp_mask = ngtcp2_crypto_hp_mask_cb,
 		.recv_retry = ngtcp2_crypto_recv_retry_cb,
-		.update_key = ngtcp2_crypto_update_key_cb,
 		.delete_crypto_aead_ctx = ngtcp2_crypto_delete_crypto_aead_ctx_cb,
 		.delete_crypto_cipher_ctx = ngtcp2_crypto_delete_crypto_cipher_ctx_cb,
 		.get_path_challenge_data = ngtcp2_crypto_get_path_challenge_data_cb,
 
+		.update_key = update_key,
 		.acked_stream_data_offset = acked_stream_data_offset,
 		.recv_stream_data = recv_stream_data_cb,
 		.rand = rand_cb,
@@ -1840,6 +1979,7 @@ int init_default_config(Config *config)
 	config->quic_transport_parameter_file = "quic_transport_parameter.pem";
 	config->ciphers = NULL;
 	config->groups = NULL;
+	config->show_secret = 0;
 	return 0;
 }
 
@@ -1877,6 +2017,7 @@ int main(int argc, char *argv[])
 		/* TLSv1.3 groups="P-256:P-384:P-521:X25519:X448:ffdhe2048:ffdhe3072:ffdhe4096:ffdhe6144:ffdhe8192" etc (https://www.openssl.org/docs/manmaster/man3/SSL_CTX_set1_groups_list.html)*/
 		/* TLSv1.3 groups参考文档 https://datatracker.ietf.org/doc/html/rfc8446#section-4.2.7 */
 		{.name = "groups", .has_arg = required_argument, .flag = &flag, .val = 7},
+		{.name = "show-secret", .has_arg = no_argument, .flag = &flag, .val = 8},
 		{0, 0, 0, 0},
 	};
 	while (1)
@@ -1910,6 +2051,8 @@ int main(int argc, char *argv[])
 				config.ciphers = optarg;
 			else if (flag == 7) /* groups */
 				config.groups = optarg;
+			else if (flag == 8) /* show-secret */
+				config.show_secret = 1;
 			else
 			{
 				fprintf(stderr, "[ERROR] other flags\n");
@@ -1962,6 +2105,7 @@ int main(int argc, char *argv[])
 	c.remote_addrlen = remote_addrlen;
 	c.httpconn = NULL;
 	c.handshake_confirmed = 0;
+	c.nkey_update = 0;
 
 	c.ssl_ctx = NULL;
 	c.ssl = NULL;
