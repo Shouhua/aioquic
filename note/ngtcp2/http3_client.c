@@ -1057,7 +1057,7 @@ int client_ssl_init(struct client *c, char *host, const char *cafile, const char
 				ERR_error_string(ERR_get_error(), NULL));
 		return -1;
 	}
-	if (cafile && private_key_file)
+	if (cafile && private_key_file) /* NOTICE: 也可以将self-signed cert先导入系统证书，然后使用系统默认目录 */
 	{
 		if (SSL_CTX_use_PrivateKey_file(c->ssl_ctx, private_key_file, SSL_FILETYPE_PEM) != 1)
 		{
@@ -1073,9 +1073,8 @@ int client_ssl_init(struct client *c, char *host, const char *cafile, const char
 	}
 	else
 	{
-		err = SSL_CTX_load_verify_locations(c->ssl_ctx, NULL, "/etc/ssl/certs");
-		// TODO: 这个真的不懂了，按道理是应该下面的可以的，为什么需要手动添加呢？
-		// err = SSL_CTX_set_default_verify_paths(c->ssl_ctx);
+		/* NOTICE: 使用QUICTLS默认的目录证书相关配置为空，需要手动修改配置各种软连接到系统证书，详见note.md->2024-04-24 */
+		err = SSL_CTX_set_default_verify_paths(c->ssl_ctx);
 		if (err <= 0)
 		{
 			fprintf(stderr, "Could not load trusted certificates: %s\n", ERR_error_string(ERR_get_error(), NULL));

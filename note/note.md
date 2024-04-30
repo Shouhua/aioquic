@@ -1,3 +1,115 @@
+## 2024-04-30
+### 打印所有certs的subject
+```awk -v cmd='openssl x509 -noout -subject' '/BEGIN/ {close(cmd)}; {print | cmd}' < /etc/ssl/certs/ca-certificates.crt```
+
+### Ubuntu中证书设置
+[golang源代码](https://go.dev/src/crypto/x509/root_linux.go)中有列出各种linux版本系统证书相关文件夹和文件位置。  
+Ubuntu中系统证书位于文件夹`/etc/ssl/certs`, 文件夹中所有证书也都放在一个系统证书中`/etc/ssl/certs/ca-certificates.crt`。当我们需要想Ubuntu中添加证书时, 并不手动操作这两处, 而是使用`update-ca-certificates`命令。
+```man 8 update-ca-certificates```
+这个文档中对于操作系统证书说的很清楚。
+
+https://www.openssl.org/docs/man3.0/man1/openssl-rehash.html
+
+openssl rehash .
+openssl x509 -hash -fingerprint -noout ca_cert.crt
+
+### Ubuntu中浏览器证书设置
+Ubuntu有自己的系统证书机制如上面解释, 而浏览器(firefox和chrome)则使用自己的一套certificate store。  
+firefox和chrome都是用sqlite存储用户导入证书, 具体放在文件名为`cert9.db`的文件中, 但是用户不直接操作, 使用`libnss3-tool`管理证书, 主要命令是`certutil`
+```man 1 certutil```
+这个命令能做的事情很多, 比如生成证书, 更新等, 我们主要使用列出证书, 添加证书, 删除证书功能。
+
+[chromium源码文档](https://chromium.googlesource.com/chromium/src/+/master/docs/linux/cert_management.md#add-a-certificate)中有解释如何使用certutil添加证书
+```bash
+# Firefox cert db directory
+FF_CERTDB=$(find $HOME -type f -name 'cert9.db' | grep firefox | xargs dirname)
+# Chrome/chromium cert db directory
+CHROME_CERTDB="$HOME/snap/chromium/current/.pki/nssdb"
+
+# List USER imported certs
+certutil -L -d sql:$FF_CERTDB
+certutil -L -d sql:$CHROME_CERTDB
+
+# Add cert
+# -A add, -d db directry, -t ssl,mail,object signing, -n nick name, -i cert
+# 具体可以参看man 1 certutil里面对于options的解释
+certutil -A -d sql:$FF_CERTDB -t "C,," -n localhost_quic -i ca_cert.crt
+certutil -A -d sql:$CHROME_CERTDB -t "C,," -n localhost_quic -i ca_cert.crt
+
+# Delete cert by nickname
+certutil -D -d sql:$FF_CERTDB -n localhost_quic
+certutil -D -d sql:$CHROME_CERTDB -n localhost_quic
+```
+其中重点是找到浏览器的cert store地址, 现在Ubuntu平台使用snap安装浏览器, 会放在用户snap目录(`$HOME/snap/[chromium/firefox]`)下面, 如果没有使用snap, 可以查看个人目录下面的隐藏文件夹(`$HOME/.pki/nssdb`)。
+
+上面只是Ubuntu平台的, 还有其他Linux平台, Windows平台以及Mac等, 每个平台使用的工具和地址都不一样, 比如chrome在windows平台使用系统证书管理, 而firefox则还是使用自己的证书管理。[mkcert](https://github.com/FiloSottile/mkcert), 专门针对这个问题, 可以参考源代码。
+
+### Ubuntu平台JKS(JAVA Key Store)管理
+根据[mkcert](https://github.com/FiloSottile/mkcert), JKS的store位于`$JAVA_HOME/lib/security/cacerts`或者`$JAVA_HOME/jre/lib/security/cacerts`。JKS使用JDK提供的工具`keytool`管理。
+
+JKS的store默认密码是`changeit`。
+```bash
+# find JAVA_HOME
+export JAVA_HOME=readlink -f $(which java) | xargs dirname | xargs dirname
+
+# List
+keytool -list -keystore $JAVA_HOME/lib/security/cacerts -storepass changeit | head -5
+# OR
+keytool -list -cacerts -storepass changeit | head -5
+
+# Add
+keytook -import -alias testCert -keystore $JAVA_HOME/lib/security/cacerts -file ca_cert.crt
+```
+
+
+## 2024-04-29
+### 使用`OpenSSL`编译`http3_client.c`报错: `"unable to get local issuer certificate"`
+解决来源: https://unix.stackexchange.com/questions/660361/unable-to-get-local-issuer-certificate-but-my-trusted-ca-certificate-store-seem
+```c
+// test.c
+#include <stdio.h>
+#include <openssl/x509.h>
+
+int main()
+{
+     const char *file_path = X509_get_default_cert_file();
+     const char *dir_path = X509_get_default_cert_dir();
+     const char *file_env = X509_get_default_cert_file_env();
+     const char *file_env = X509_get_default_cert_dir_env();
+     printf(format: "file: %s, dir: %s, file_env: %s, dir_env: %s\n", 
+          file_path, dir_path, file_env, dir_env);
+
+     return 0;
+}
+// 打印原生OpenSSL相关证书地址
+// gcc -o test test.c -lcrypto && ./test
+// file: /usr/lib/ssl/cert.pem, dir: /usr/lib/ssl/certs, file_env: SSL_CERT_FILE, dir_env: SSL_CERT_DIR
+
+// 打印QUICTLS相关证书地址
+// gcc -o test test.c -L/usr/local/lib64 -lcrypto && ./test
+// file: /usr/local/ssl/cert.pem, dir: /usr/local/ssl/certs, file_env: SSL_CERT_FILE, dir_env: SSL_CERT_DIR
+```
+根本原因是因为使用`quictls`后, `quictls`(`OpenSSL`)使用新配置目录`/usr/local/ssl`, 但是里面跟证书相关的配置全是空的, 里面只有`certs`文件夹, 而且里面是空的。所以在进行证书验证时候, 找不到最终的根证书, 就会报错: `"unable to get local issuer certificate"`。比如`www.example.org`会传来两个证书, site cert和intermediate cert, 但是始终在本地找不到root cert。 
+
+解决办法是跟原生`OpenSSL`配置目录(`/usr/lib/ssl`)里面证书设置的一样就好, 主要包括`certs`文件夹, `private`文件夹, `openssl.cnf`文件。
+```bash
+openssl version -d # 打印SSL配置目录
+
+QUICTLS_DIR=/usr/local/ssl
+sudo rmdir "$QUICTLS_DIR/certs"
+sudo ln -s /etc/ssl/certs "$QUICTLS_DIR/certs"
+
+sudo rmdir "$QUICTLS_DIR/private"
+sudo ln -s /etc/ssl/private "$QUICTLS_DIR/private"
+
+sudo rm "$QUICTLS_DIR/openssl.cnf"
+sudo ln -s /etc/ssl/openssl.cnf "$QUICTLS_DIR/openssl.cnf"
+
+/usr/local/bin/openssl version -a # QUICTLS的各种配置
+openssl version -a # 原生OpenSSL的各种地址, 特别是OPENSSLDIR
+```
+`openssl`命令始终使用原生的, 因为原生是`/usr/bin/openssl`, `QUICTLS`的`openssl`命令位于`/usr/local/bin/openssl`。
+
 ## 2024-04-24
 ### OpenSSL certificate verification(Demystifying Cryptography with OpenSSL 3.0(page 195))
 #### 加载证书
@@ -956,7 +1068,7 @@ gcc编译时手动指定-L, 并且在运行时指定rpath(可以通过readelf查
 ### QUIC中使用的tls1.3不同点
 1. tls中处理的是headshake header和payload, 没有原先的record, 取而代之是quic long/short header
 2. 传入client initial header中的dcid作为初始key计算, 后面tls层计算除各种加解密的对称密钥封装
-3. key update机制不一样，QUIC使用它`Key Phase bit` toggle来通知peer，TLS1.3使用`Key Update`消息通知
+3. key update机制不一样, QUIC使用它`Key Phase bit` toggle来通知peer, TLS1.3使用`Key Update`消息通知
 
 ### Ubuntu中history多个ssh终端无法共享
 ```shell
