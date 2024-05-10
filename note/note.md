@@ -1,3 +1,12 @@
+## 2024-05-08
+```bash
+javac -d target .\src\main\java\com\itranswarp\sample\*.java .\src\main\java\module-info.java
+jar --create --file hello.jar --main-class com.itranswarp.sample.Main -C target .
+java -jar .\hello.jar
+jmod create --class-path hello.jar hello.jmod
+java --module-path hello.jar --module hello.world
+```
+
 ## 2024-04-30
 ### 打印所有certs的subject
 ```awk -v cmd='openssl x509 -noout -subject' '/BEGIN/ {close(cmd)}; {print | cmd}' < /etc/ssl/certs/ca-certificates.crt```
@@ -996,7 +1005,7 @@ readelf -d build/client | grep -E 'RUNPATH|RPATH'
 ```
 2. 可以设置`LD_LIBRARY_PATH`, 比如`LD_LIBRARY_PATH="/usr/local/lib64" openssl version`也能正确运行
 3. 设置DT_RUNPATH, 方法同1, 但是需要她的使用顺序以及她只应用与DT_NEEDED的依赖库, 他们的子依赖不会使用这个参数指定的地址, 这也是争议的地方, DT_RPATH说是过时了, 而且存在安全争议, 但是在检索第一位管用
-4. /etc/ld.so.cache本地缓存, 这个需要在机器上自己设置, 一般在目录 `/etc/ld.so.conf.d/` 添加配置文件, 然后刷新缓存: <br>
+4. **/etc/ld.so.cache本地缓存, 这个需要在机器上自己设置, 一般在目录 `/etc/ld.so.conf.d/` 添加配置文件, 然后刷新缓存**: <br>
 ```shell
 echo "/usr/local/lib64" | sudo tee /etc/ld.so.conf.d/quictls.conf # 添加配置文件
 sudo ldconfig # 刷新 ld.so.cache
