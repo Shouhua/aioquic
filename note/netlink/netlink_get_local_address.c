@@ -1,3 +1,6 @@
+/**
+ * gcc -Wall -Wextra -pedantic -o getlocaladdr netlink_get_local_address.c
+ */
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>

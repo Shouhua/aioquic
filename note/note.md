@@ -1,3 +1,487 @@
+## 2024-05-28
+### no_proxy配置格式
+```bash
+127.0.0.1/24, ::1, .example.com
+```
+1. **不需要指定端口，域名可以使用.开头，匹配所有结尾的域名，包括端口**, 比如上面匹配`http3.example.com:8443`
+2. curl是respect no_proxy 参数的，可以使用-vv查看是否使用了代理
+
+## 2024-05-27
+### [find](https://man7.org/linux/man-pages/man1/find.1.html)
+```bash
+find [OPTIONS] [starting-point] [EXPRESSION]
+```
+- OPTIONS 里面 `-H -L -P` 用于表示如何处理symbolic link; `-O` 表示优化级别，一般用不到; `-D` 用于调试，比如
+```bash
+`-D help` 打印出所有的选项, 
+`-D tree` 打印出predicate list，可以看到默认添加的参数等，非常有用
+```
+- starting-point 可以有多个，最好使用相对路径和绝对路径，比如`./abc`和`/abc`, 避免被乱解释了，比如路径开头为`-`，就会被解释为expression argument。
+- `EXPREESION` 用于表示怎么匹配文件和匹配后怎么做。包括以下几个部分： Tests, Actions, Global options, Positional options, Operators。
+     1. Tests
+     返回`true`或者`false`。根据文件属性包括日期、权限、状态、大小等，选择我们关心部分作为测试参数，比如`-empty`表示文件内容为空的判断
+     2. Actions
+     返回`true`或者`false`。 匹配文件怎么做，比如，`-print`将当前匹配文件名打印
+     3. Global Options
+     总是返回`true`。 影响所有的tests和actions参数，比如, `-depth`指示find按照深度优先方式traverse
+     4. Positional Options
+     总是返回`true`。 只是影响他之后的tests和actions参数，比如，`-regextype` 指示他后面使用的regex方言类型
+     5. Operators
+     逻辑连接参数，expr之间默认是-a表示and，并且**不管显式或者隐式`-a`优先级高于`-o`**。 其他有趣的还包括  
+     `()` 调整precedence   
+     `! expr`或者`(-not expr)` 取反    
+     `expr1, expr2` 2个表达式都会执行，但是结果取expr2的, 举例
+     ```bash
+     find . ! -path './node_modules/*' \( \( -type f -print \) , \( -type d -exec echo 'directory: {}' \; \) \)     
+     ``` 
+
+#### 注意点
+1. 默认action是`-print`, 这里的默认是说，如果命令中没有任何一个action, 会在最后添加`-a -print`, 但是如果有多个判断分支，但是有一个有action, 那不会添加默认，比如
+     ```bash
+     find . -name afile -o -name bfile -print
+     ```
+     这个afile判断是不会添加`-print`的，所以最后变成了
+     ```bash
+     find . ( -name afile ) -o ( -name bfile -a -print )
+     ```
+     其中默认添加了-a, 遇到afile时候就会跳过了，相当于continue, 可以使用`-D tree`看到最后执行的命令表达式
+     `find -D tree . -name afile -o -name bfile`会得到：
+     ```bash
+     Predicate List:
+          [(] [-name] [-o] [-name] [)] [-a] [-print]
+     ```
+
+2. 如果只有`-prune`或者`-quit`，会添加默认`-print`。     
+     `-prune`表示如果是文件夹，不递归他。`-prune`总是返回true, 常用于跳过某个文件或者目录，比如`find . -path './node_modules' -prune -o -type f -print`;   
+     `-quit`用于成功了整个命令退出，比如打印第一个匹配成功的文件 `find . -path './node_moduels' -prune -o -type f -print -quit`。
+
+3. 以下actions会禁止`-print`, 包括`-delete, -exec, -execdir, -ok, -okdir, -fls, -fprint, -fprintf, -ls, -print, -printf`。
+4. `-maxdepth 0` (global options)可以指示只处理start point
+5. 为了防止被当成SHELL中特殊字符，find命令中参数有些要注意转译，比如括号、分号、加号等，凡是在SHELL中特殊字符尽量转移，不然后果未知, 比如`find . -path './node_modules' -prune -o -type f -exec echo {} ;`如果最后的`;`不转译，find命令找不到结束符号报错。还有最后的`+`也是一样, `find . -path './node_modules' -prune -o -type f -ok echo {} \;`, `-ok`每次执行命令都会询问。
+6. -exec COMMAND [\;|\+
+     最后`;`和`+`, 前者是每次都执行一次COMMAND, 后者是将参数以空格形式分割，最后执行一次COMMAND。
+7. -name pattern
+     表示file的**basename**是否符合pattern, 比较时候会去掉leading directory
+8. -path pattern
+     匹配的是整个filename, 包括路径, 比如   
+     ```bash
+     find . \( ! -path './node_modules/*' ! -name 'eslint.config.js' -type f \) -print
+     ```     
+
+## 2024-05-24
+### 编译QEMU和Linux Kernel 6.9.1
+#### [编译QEMU](https://wiki.qemu.org/Hosts/Linux)
+```bash
+sudo apt-get install git libglib2.0-dev libfdt-dev libpixman-1-dev zlib1g-dev ninja-build libslirp-dev python3-sphinx
+sudo apt-get install libaio-dev libbluetooth-dev libcapstone-dev libbrlapi-dev libbz2-dev
+sudo apt-get install libcap-ng-dev libcurl4-gnutls-dev libgtk-3-dev
+sudo apt-get install libibverbs-dev libjpeg8-dev libncurses5-dev libnuma-dev
+sudo apt-get install librbd-dev librdmacm-dev
+sudo apt-get install libsasl2-dev libsdl2-dev libseccomp-dev libsnappy-dev libssh-dev
+sudo apt-get install libvde-dev libvdeplug-dev libvte-2.91-dev libxen-dev liblzo2-dev
+sudo apt-get install valgrind xfslibs-dev 
+sudo apt-get install libnfs-dev libiscsi-dev
+
+git clone git@github.com:qemu/qemu.git
+cd qemu
+mkdir build && cd $_
+../configure --help
+../configure \
+    --prefix=$HOME/software/qemu \
+    --target-list="i386-softmmu,x86_64-softmmu" \
+    --enable-virtfs \
+    --enable-debug \
+    --extra-cflags="-g3" \
+    --extra-ldflags="-g3" \
+    --enable-slirp \ # 默认是开启的, 但是宿主机上要有libslirp-dev包
+    --disable-strip
+make && make install # 因为安装在用户目录, 不需要sudo
+```
+
+#### [编译Linux Kernel 6.9.1](https://github.com/d0u9/Linux-Device-Driver/blob/master/02_getting_start_with_driver_development/02_compile_Linux_Kernel.md)
+```bash
+curl -LO https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.9.1.tar.xz
+tar xf linux-6.9.1.tar.xz
+make defconfig
+make menuconfig
+make -j bzImage
+# Generate Module.symvers file
+make -j modules
+```
+编译完成后, bzImage位于当前目录下的`arch/x86_64/boot/bzImage`
+
+#### [qemu运行准备](https://github.com/d0u9/Linux-Device-Driver/blob/master/02_getting_start_with_driver_development/03_build_initramfs.md)
+```bash
+# 1. Create initramfs image, 当前位于解压内核目录
+mkdir initramfs && cd $_
+mkdir -p {bin,dev,etc,lib,lib64,mnt,proc,root,sbin,sys,tmp}
+chmod 1777 tmp
+sudo cp -a /dev/{null,console,tty,ttyS0} dev/
+
+# 2. Install busybox, 利用busybox提供的工具
+wget https://www.busybox.net/downloads/binaries/1.30.0-i686/busybox -O bin/busybox
+chmod +x bin/busybox
+
+# The --install option instructs busybox to create utilities in bin and sbin directories
+bin/busybox --install bin
+bin/busybox --install sbin
+
+# 3. 生成init script, 目前在initram文件夹
+cat << EOF > init
+#!/bin/busybox sh
+
+# Mount the /proc and /sys filesystems.
+mount -t proc none /proc
+mount -t sysfs none /sys
+
+# Boot real things.
+
+# NIC up
+ip link set eth0 up
+ip addr add 10.0.2.15/24 dev eth0
+ip link set lo up
+
+# Wait for NIC ready
+sleep 0.5
+
+# Make the new shell as a login shell with -l option
+# Only login shell read /etc/profile
+setsid sh -c 'exec sh -l </dev/ttyS0 >/dev/ttyS0 2>&1'
+
+EOF
+
+chmod +x init
+
+# name resolve
+cat << EOF > etc/hosts
+127.0.0.1    localhost
+10.0.2.2     host_machine
+EOF
+
+# common alias
+cat << EOF > etc/profile
+alias ll='ls -l'
+EOF
+
+# busybox saves password in /etc/passwd directly, no /etc/shadow is needed.
+cat << EOF > etc/passwd
+root:x:0:0:root:/root:/bin/bash
+EOF
+
+# group file
+cat << EOF > etc/group
+root:x:0:
+EOF
+
+# 4. 生成initramfs.cpio.gz
+find . -print0 | cpio --null -ov --format=newc | gzip -9 > ../initramfs.cpio.gz
+
+# 5. 启动虚拟机
+qemu -enable-kvm \
+	-kernel $HOME/project/ldd3/linux-6.9.1/arch/x86_64/boot/bzImage \
+	-initrd $HOME/project/ldd3/linux-6.9.1/initramfs.cpio.gz \
+	-append console=ttyS0 \
+	-netdev user,id=host_net,hostfwd=tcp::7023-:23 \
+	-device e1000,netdev=host_net \
+	-nographic
+
+# 6. 测试网络
+```bash
+# 虚拟机中执行
+telnetd -F -l /bin/sh
+# 本地执行
+telnet localhost 7023
+```
+
+## 2024-05-21
+### openssl verify
+使用`openssl verify`时, 如果你的证书有chain, 需要使用`-untrusted`指定chain cert。
+```bash
+openssl verify -show_chain -verbose -untrusted ~/Downloads/http3-R3.pem ~/Downloads/http3.pem
+```
+比如上述`http3.pem`为server cert, R3为intermediated cert, 最后有个root cert, 这个证书是可以在系统证书库中找到的, 所以需要将R3指定为untrusted。
+
+### proxy全局变量
+ubuntu中有可以看到两个跟proxy有关的变量
+```bash
+declare -p | grep proxy
+# declare -x no_proxy="localhost,127.0.0.1/8,::1"
+# declare -x all_proxy="socks://127.0.0.1:1080"
+```
+这些参数与gnome设置的proxy配置无关
+```bash
+gsettings list-recursively org.gnome.system.proxy
+```
+但是, 终端有些命令会根据全局proxy变量判断是否使用代理, 比如curl, 可以显示的关闭, 因为socks5不支持http3
+```bash
+curl -I -vv --http3 --noproxy '*' https://example.com
+```
+1. apt使用proxy
+```bash
+echo 'Acquire::socks::proxy "socks5://127.0.0.1:10800";' | sudo tee /etc/apt/apt.conf.d/proxy.conf
+# OR
+sudo bash -c "echo 'Acquire::socks::proxy \"socks5://127.0.0.1:10800\";' > /etc/apt/apt.conf.d/proxy.conf"
+```
+2. curl使用socks5, 默认貌似使用socks4
+```bash
+curl -vv -I --socks5 127.0.0.1:10800 www.google.com
+curl -vv -I -x 'socks5h://127.0.0.1:10800' www.google.com
+```
+其中, **`socks4a`和`socks5h`协议支持DNS解析**。
+
+## 2024-05-18
+### 本地无线热点接入数据脚本, 使用ufw, iptables, nmcli
+nmcli命令说明 https://zhuanlan.zhihu.com/p/395236748, nmcli是NetworkManager的命令行管理
+```bash
+#! /usr/bin/env bash
+#
+# 用法：$0 [ | delete ]
+
+# 1. 检查物理网络是否可用
+# 2. 新建热点
+# 3. 新建各种路由
+
+set -uo pipefail
+
+ACTION=${1:-""} # delete或者其他
+
+HOTSPOT_NAME="Hotspot"
+HOTSPOT_SSID="ubuntu"
+HOTSPOT_PWD="ubuntu123"
+WIRELESS_INTERFACE=""
+PHYSICAL_INTERFACE=""
+PHYSICAL_INTERFACE_STATE=""
+REDSOCKS_PORT=12345
+UFW_RULE_NUM=1
+
+if ! command -v nmcli >/dev/null 2>&1; then
+    echo "没有nmcli命令, 退出"
+    exit -1
+fi
+
+DEVICE_INFO=$(nmcli -t -f TYPE,DEVICE,STATE device status | grep -E 'wifi:|ethernet:')
+read -r -d '' -a DEVICE_INFO_LINES <<< "$DEVICE_INFO"
+
+# 使用nmcli获取物理网卡和无线网卡信息
+for item in "${DEVICE_INFO_LINES[@]}"; do
+    IFS=':' read -r -a DEVICE <<<$item
+    DEVICE_TYPE=${DEVICE[0]}
+    DEVICE_NAME=${DEVICE[1]}
+    DEVICE_STATE=${DEVICE[2]}
+    # 无线网卡
+    if [[ ${DEVICE_TYPE} = "wifi" ]]; then
+        WIRELESS_INTERFACE=${DEVICE_NAME}
+        echo "无线网卡: ${WIRELESS_INTERFACE}, 状态: ${DEVICE_STATE}"
+    fi
+
+    # 物理网卡
+    if [[ ${DEVICE_TYPE} = "ethernet" ]]; then
+        PHYSICAL_INTERFACE=${DEVICE_NAME}
+        PHYSICAL_INTERFACE_STATE=${DEVICE_STATE}
+        echo "物理网卡: ${PHYSICAL_INTERFACE}, 状态: ${DEVICE_STATE}"
+    fi
+done
+
+if [[ -z ${WIRELESS_INTERFACE} || -z ${PHYSICAL_INTERFACE} ]]; then
+    echo "没有无线网卡或者物理网卡"
+    exit -1
+fi
+
+if [[ -z $ACTION ]]; then
+    if [[ ! ${PHYSICAL_INTERFACE_STATE} = "connected" ]]; then
+        echo "物理网路状态为：${PHYSICAL_INTERFACE_STATE}, 请确保连接状态"
+        exit -1
+    fi
+    # 默认会新建ipv4和ipv6两条规则, 使用0.0.0.0/0指定生成ipv4规则, 便于后面删除条数计算
+    # sudo ufw status verbose
+    sudo ufw allow in on $WIRELESS_INTERFACE from 0.0.0.0/0 comment "无线wifi允许数据接入, 默认不允许" 
+    echo "成功修改ufw规则, 允许无线网卡接受数据"
+
+    # route wireless input data to redsocks SOCKS5 client
+    sudo iptables -t nat -N REDSOCKS
+    sudo iptables -t nat -A PREROUTING -i ${WIRELESS_INTERFACE} -p tcp -j REDSOCKS
+    sudo iptables -t nat -A REDSOCKS -p tcp -j REDIRECT --to-port $REDSOCKS_PORT
+    echo "成功添加iptables规则, 将无线网卡数据redirect到redsocks"
+
+    # start redsocks service
+    sudo systemctl restart redsocks
+    echo "成功开启redsocks"
+
+    # 打开热点
+    nmcli dev wifi hotspot con-name "${HOTSPOT_NAME}" ssid "${HOTSPOT_SSID}" password "${HOTSPOT_PWD}"
+    echo "成功开启热点: ${HOTSPOT_NAME}, ${HOTSPOT_SSID}, ${HOTSPOT_PWD}"
+    sleep 1
+    # 查看热点状态
+    nmcli connection show --active
+elif [[ $ACTION = 'delete' ]]; then
+    # delete ufw rules
+    arr=( $(seq ${UFW_RULE_NUM}) )
+    length=${#arr[@]}
+    for (( i=$length; i>=1; i-- )); do 
+        echo 'y' | sudo ufw delete $i
+    done
+    echo "成功删除ufw规则"
+
+    # delete iptables rules
+    sudo iptables -t nat -D PREROUTING -i $WIRELESS_INTERFACE -p tcp -j REDSOCKS
+    sudo iptables -t nat -D REDSOCKS -p tcp -j REDIRECT --to-port $REDSOCKS_PORT
+    sudo iptables -t nat -X REDSOCKS
+    echo "成功删除iptables规则"
+
+    # stop redsocks
+    sudo systemctl stop redsocks
+    echo "成功停止redsocks"
+
+    nmcli connection delete $HOTSPOT_NAME
+    echo "成功删除热点: ${HOTSPOT_NAME}"
+    sleep 1
+    nmcli connection show --active
+else
+    echo "$0 [ | delete ]"
+fi
+```
+
+### Ubuntu 24.04中网络管理
+目前版本24.04使用`netplan`作为网络管理的抽象层
+<img src="netplan_design_overview.svg" alt="netplan design overview" width="500" height="300">
+Linux管理网络组件很多, 每个配置都不一样, `netplan`使用同一份配置可以应用于不同的网络管理组件, 目前支持两种渲染器：`Network Manager`和`systemd-networkd`, 默认是`Network Manager`。
+
+因此实际管理网络的是`Network Manager`, 可以查看`man 5 NetworkManager.conf`查看相关配置, 配置文件位于`/etc/NetworkManager/NetworkManager.conf`。
+
+网络有很多部分, 比如无线, 有线, DNS, 蓝牙等, NetworkManager使用不同的软件管理这些组件。无线部分使用`wpa_supplicant`(见`wifi.backend`), dhcp client端也有多种选择, 默认使用internal。
+
+其中DNS配置很有意思, 根据`manpage`文档, DNS管理使用`systemd-resolved`, `/etc/resolv.conf`文件是软连接至`/run/systemd/resolve/stub-resolv.conf`。可以设置使用`dnsmasq`, 这个软件是直接安装了的。
+
+### Ubuntu 24.04 DNS管理
+[DNS基础知识1](https://www.cloudflare.com/learning/dns/what-is-dns/)<br>
+[DNS基础知识2](http://www.ruanyifeng.com/blog/2016/06/dns.html)<br>
+https://zwischenzugs.com/2018/06/08/anatomy-of-a-linux-dns-lookup-part-i<br>
+
+使用`resolvectl`命令可以作为`systemd-resolved`的后台管理DNS, 包括DNS缓存等, 其他如`resolvconf`命令则不使用, 前者提供了适配。
+
+`systemd-resolved`将`nameserver 127.0.0.53`写入`/etc/resolv.conf`的链接文件, 并且会在本地53端口起个服务, 那其他软件DNS查找这个文件, 都是访问本地53端口服务(这个成为`stub resolver`), 但是真正的服务server会藏在`systemd-resolved`的相关配置文件中, 可以使用如下命令查看: `resolvectl status`, 她会列出所有网络设备的resolve信息
+```
+Link 3 (wlp4s0)
+    Current Scopes: DNS
+         Protocols: +DefaultRoute -LLMNR -mDNS -DNSOverTLS DNSSEC=no/unsupported
+Current DNS Server: 192.168.0.1
+       DNS Servers: 192.168.0.1
+        DNS Domain: lan
+```
+这里的DNS server一般是局域网内部的DNS server分配的, 然后会去请求ISP的DNS server(DNS的**迭代模式(`Iterate`)**), 最后会进入**递归模式**, 不断从`ROOT(.)`, `TLD nameserver(Top Level Domain)(.com)`, `Authoritative nameserver(baidu.com)`获取DNS信息, 返回信息有各种所谓的`Record`, 下面是常见的[Record](https://www.cloudflare.com/learning/dns/dns-records/dns-txt-record/)：
+```
+A - IPV4
+AAAA - IPV6
+NS - Authoritative Name Server
+CNAME - 别名, 比如www.baidu.com -> www.shifen.com
+MX - Mail
+TXT - Human readable document
+PTR - reverse DNS lookup, 由ip查域名
+```
+
+#### 查看缓存
+前面说到的是全流程, 每次这么多, Server负载过重, 网络也有考虑, 所有每层都会有缓存。
+使用`sudo resolvectl statistic`可以查看缓存情况, 如果想查看缓存, 使用`sudo pkill -USR1 systemd-resolve`, 然后在syslog中查看 `sudo journalctl -u systemd-resolved > ~/resolved.txt`。**注意上面打印的数据是unique的数据, 记录中可能有多个相同域名指向多个IP**。
+#### 清空缓存
+清空所有cache
+```bash
+sudo pkill -USR2 systemd-resolve
+# OR
+sudo resolvectl flush-caches
+sudo resolvectl statistic
+```
+
+#### nsswitch和ncsd
+[nscd](https://cloud.tencent.com/developer/article/2242697)这篇文章总结的不错   
+当我们使用glibc库提供的DNS解析函数, 比如`getaddrinfo`等时, glibc内部也有专门的解析模块处理。  
+glibc通过`NSS(Name Service Switch)`模块提供了各类名称解析服务, 比如用户名->`USER ID`, 组名->`GROUP ID`, 域名->`IP`等, **这个不要跟Firefox的NSS(Network Security Services)模块弄混淆了**。当然也提供了这些映射的缓存, `nscd(Name Service Cache Daemon)`模块管理缓存, [nscd manpage](https://man7.org/linux/man-pages/man8/nscd.8.html), 可以使用`getent database key`从数据库中获取NSS支持类型的存储
+```bash
+getent ahosts # get A record host
+getent group # get group resolve record
+man 5 nss
+man 5 nsswitch.conf
+```
+`nsswitch`的配置文件见`/etc/nsswitch.conf`, 我们关心DNS相关的是
+```bash
+hosts:          files mdns4_minimal [NOTFOUND=return] dns
+```
+其中`hosts`值规定使用DNS查询的顺序, `files`代表`/etc/hosts`, `mdns4_minimal`使用系统提供的`multicast DNS`解析服务, 如果有这个服务, 调用成功但是没有我们要的结果就返回, 如果没有提供这个服务, 就进入`dns`配置, 使用系统提供的DNS服务查询(`/etc/resolv.conf`)。
+使用`nsswitch`查询DNS整个过程, 可以通过`strace`查看到
+```bash
+sudo strace -e trace=open,openat,connect -f ping -c1 www.baidu.com
+     openat(AT_FDCWD, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3
+     openat(AT_FDCWD, "/lib/x86_64-linux-gnu/libcap.so.2", O_RDONLY|O_CLOEXEC) = 3
+     openat(AT_FDCWD, "/lib/x86_64-linux-gnu/libidn2.so.0", O_RDONLY|O_CLOEXEC) = 3
+     openat(AT_FDCWD, "/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC) = 3
+     openat(AT_FDCWD, "/lib/x86_64-linux-gnu/libunistring.so.5", O_RDONLY|O_CLOEXEC) = 3
+     openat(AT_FDCWD, "/usr/lib/locale/locale-archive", O_RDONLY|O_CLOEXEC) = 3
+     openat(AT_FDCWD, "/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache", O_RDONLY|O_CLOEXEC) = 5
+# nscd缓存
+     connect(5, {sa_family=AF_UNIX, sun_path="/var/run/nscd/socket"}, 110) = -1 ENOENT (没有那个文件或目录)
+     connect(5, {sa_family=AF_UNIX, sun_path="/var/run/nscd/socket"}, 110) = -1 ENOENT (没有那个文件或目录)
+# 使用了getaddrinfo, 所以会调用nsswitch查询dns
+     openat(AT_FDCWD, "/etc/nsswitch.conf", O_RDONLY|O_CLOEXEC) = 5
+# hosts中配置files第一顺序
+     openat(AT_FDCWD, "/etc/host.conf", O_RDONLY|O_CLOEXEC) = 5
+     openat(AT_FDCWD, "/etc/resolv.conf", O_RDONLY|O_CLOEXEC) = 5
+     openat(AT_FDCWD, "/etc/hosts", O_RDONLY|O_CLOEXEC) = 5
+     openat(AT_FDCWD, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 5
+# 使用multicast DNS本地局域网所有example.local机器咨询DNS, 没有这个机器服务, 下一个dns系统查询
+     openat(AT_FDCWD, "/lib/x86_64-linux-gnu/libnss_mdns4_minimal.so.2", O_RDONLY|O_CLOEXEC) = 5
+# hosts配置中的dns, 使用系统提供的dns服务, 即systemd-resolved
+     connect(5, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("127.0.0.53")}, 16) = 0
+     openat(AT_FDCWD, "/etc/gai.conf", O_RDONLY|O_CLOEXEC) = 5
+     ...
+     connect(5, {sa_family=AF_INET, sin_port=htons(1025), sin_addr=inet_addr("183.2.172.42")}, 16) = 0
+     PING www.a.shifen.com (183.2.172.42) 56(84) bytes of data.
+     openat(AT_FDCWD, "/etc/hosts", O_RDONLY|O_CLOEXEC) = 5
+     connect(5, {sa_family=AF_INET, sin_port=htons(53), sin_addr=inet_addr("127.0.0.53")}, 16) = 0
+     64 bytes from 183.2.172.42: icmp_seq=1 ttl=51 time=25.3 ms
+
+     --- www.a.shifen.com ping statistics ---
+     1 packets transmitted, 1 received, 0% packet loss, time 0ms
+     rtt min/avg/max/mdev = 25.305/25.305/25.305/0.000 ms
+     +++ exited with 0 +++
+```
+其中可以修改/etc/nsswitch.conf中的`hosts: file dns`就不会有`multicast DNS`请求了, 修改是自动刷新的。
+
+
+## 2024-05-14
+1. 安装[redsocks](https://github.com/darkk/redsocks)
+```bash
+sudo apt install redsocks
+```
+
+2. 修改配置
+```bash
+# sudo vi /etc/redsocks.conf
+local_ip = 0.0.0.0; # 修改监听所有接口, 不然收不到数据
+
+port = 1080; # 修改为socks server监听接口
+```
+
+3. 修改iptables, 将流量redirect到redsocks监听接口
+```bash
+# 新建
+sudo iptables -t nat -N REDSOCKS
+sudo iptables -t nat -A PREROUTING -i wlp4s0 -p tcp -j REDSOCKS
+sudo iptables -t nat -A REDSOCKS -p tcp -j REDIRECT --to-port 12345
+
+# 删除
+sudo iptables -t nat -L PREROUTING -v --line-numbers
+sudo iptables -t nat -D PREROUTING 2 # 数字需要看上面打印出来的行号
+sudo iptables -t nat -D REDSOCKS 1 # 数字需要看上面打印出来的行号
+# OR
+sudo iptables -t nat -F REDSOCKS # 清空自定义链
+# 规则全部删除完毕后, 才能删除自定义链
+sudo iptables -t nat -X REDSOCKS
+```
+
+4. **开放热点, 需要打开防火墙**
+```bash
+sudo ufw disable
+```
+
 ## 2024-05-08
 ```bash
 javac -d target .\src\main\java\com\itranswarp\sample\*.java .\src\main\java\module-info.java
@@ -1554,6 +2038,10 @@ datetime.strptime("2020-10-11", "%Y-%m-%d") # datetime.datetime(2020, 10, 11, 0,
 ```
 ## 2023-10-11
 ### [locale](https://wiki.archlinuxcn.org/wiki/Locale)
+**https://help.ubuntu.com/community/Locale 注意里面的`~/.pam_environment`会覆盖全局的update-locale设置, 并且根据前者生成全局环境变量。**  
+
+**如果系统的设置不对, https://wiki.archlinuxcn.org/wiki/Locale archlinux的文档中也提到了“我的系统的语言还是不对”, 这段中说到了桌面系统的影响**  
+
 man 5 locale <br>
 locate categories: LC_COLLATE, LC_TIME, LC_MESSAGES, LC_NAME, LC_NUMERIC等<br>
 locale keys: name_fmt, decimal_point, thousands_seperator等<br>
