@@ -501,14 +501,25 @@ Ubuntu中系统证书位于文件夹`/etc/ssl/certs`, 文件夹中所有证书�
 ```man 8 update-ca-certificates```
 这个文档中对于操作系统证书说的很清楚。
 
-https://www.openssl.org/docs/man3.0/man1/openssl-rehash.html
+### 证书匹配(rehash)
+寻找证书通过证书的subject，如果通过递归打开根目录证书文件找到subject比对，那这样效率太低了，所以通过将证书的subject的hash值作为文件名，就可以提高寻找效率了，[rehash或者c_rehash](https://www.openssl.org/docs/manmaster/man1/openssl-rehash.html)就是干这个事。比如，我的系统中有个`Go_Daddy_Class_2_CA.pem`证书
+```bash
+ll /etc/ssl/certs | grep 'Go_Daddy_Class_2_CA'
+# f081611a.0 -> Go_Daddy_Class_2_CA.pem 这个是rehash生成文件
+# Go_Daddy_Class_2_CA.pem -> /usr/share/ca-certificates/mozilla/Go_Daddy_Class_2_CA.crt
 
-openssl rehash .
+openssl x509 -hash -fingerprint -noout -in $(readlink -f /etc/ssl/certs/Go_Daddy_Class_2_CA.pem)
+# f081611a 这个hash值就是文件名, 后面的.0是防止碰撞相同的hash值引入的后缀
+# SHA1 Fingerprint=27:96:BA:E6:3F:18:01:E2:77:26:1B:A0:D7:77:70:02:8F:20:EE:E4
+
+openssl c_rehash .
 openssl x509 -hash -fingerprint -noout ca_cert.crt
+```
+将证书subject生成hash是个复杂过程，参考这个[脚本](https://github.com/nimpo/hash-bash-ssl/blob/main/hash-bash-ssl.sh)
 
 ### Ubuntu中浏览器证书设置
 Ubuntu有自己的系统证书机制如上面解释, 而浏览器(firefox和chrome)则使用自己的一套certificate store。  
-firefox和chrome都是用sqlite存储用户导入证书, 具体放在文件名为`cert9.db`的文件中, 但是用户不直接操作, 使用`libnss3-tool`管理证书, 主要命令是`certutil`
+firefox和chrome都是用sqlite存储用户导入证书, 具体放在文件名为`cert9.db`的文件中, 但是用户不直接操作, 使用`libnss3-tools`管理证书, 主要命令是`certutil`
 ```man 1 certutil```
 这个命令能做的事情很多, 比如生成证书, 更新等, 我们主要使用列出证书, 添加证书, 删除证书功能。
 
@@ -544,6 +555,7 @@ JKS的store默认密码是`changeit`。
 ```bash
 # find JAVA_HOME
 export JAVA_HOME=readlink -f $(which java) | xargs dirname | xargs dirname
+export JAVA_HOME=readlink -f $(which java) | sed 's/\/bin\/java//'
 
 # List
 keytool -list -keystore $JAVA_HOME/lib/security/cacerts -storepass changeit | head -5
@@ -954,7 +966,7 @@ openssl ciphers -V -s -tls1_3  | column -t
 ### volatile in c
 https://www.geeksforgeeks.org/understanding-volatile-qualifier-in-c/
 https://dev.to/pauljlucas/what-volatile-does-in-c-and-c-5147
-valatile本质上是告诉编译器, 跟她相关的变量别优化, 因为可能有side-effect会修改她, 而compiler你有可能不知道
+volatile本质上是告诉编译器, 跟她相关的变量别优化, 因为可能有side-effect会修改她, 而compiler你有可能不知道
 ```c
 /**
 默认不优化, 输出正常
