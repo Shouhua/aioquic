@@ -25,12 +25,13 @@ jobs:
         with:
           python-version: 3.8
       - name: Install packages
-        run: pip install mypy ruff types-certifi types-pyopenssl
+        run: pip install check-manifest mypy ruff types-certifi types-pyopenssl
       - name: Run linters
         run: |
-          ruff .
+          ruff check .
           ruff format --check --diff .
-          mypy src tests
+          mypy examples src tests
+          check-manifest
 
   codespell:
     name: Check for spelling errors
@@ -41,7 +42,7 @@ jobs:
         with:
           check_filenames: true
           check_hidden: false
-          ignore_words_list: quicly
+          ignore_words_list: assertIn,quicly
           skip: "*.bin"
 
   test:
@@ -61,13 +62,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Disable firewall and configure compiler
+      - name: Install OpenSSL and disable firewall
         if: matrix.os == 'macos-latest'
         run: |
-          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
+          brew install openssl
           echo "AIOQUIC_SKIP_TESTS=chacha20" >> $GITHUB_ENV
-          echo "CFLAGS=-I/usr/local/opt/openssl/include" >> $GITHUB_ENV
-          echo "LDFLAGS=-L/usr/local/opt/openssl/lib" >> $GITHUB_ENV
+          echo "CFLAGS=-I$(brew --prefix openssl)/include" >> $GITHUB_ENV
+          echo "LDFLAGS=-L$(brew --prefix openssl)/lib" >> $GITHUB_ENV
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
       - name: Install OpenSSL
         if: matrix.os == 'windows-latest'
         run: |

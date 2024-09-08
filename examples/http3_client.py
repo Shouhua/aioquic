@@ -25,6 +25,7 @@ from aioquic.h3.events import (
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.events import QuicEvent
 from aioquic.quic.logger import QuicFileLogger
+from aioquic.quic.packet import QuicProtocolVersion
 from aioquic.tls import CipherSuite, SessionTicket
 
 try:
@@ -426,7 +427,7 @@ async def main(
 
             # process http pushes
             process_http_pushes(client=client, include=include, output_dir=output_dir)
-        client._quic.close(error_code=ErrorCode.H3_NO_ERROR)
+        client.close(error_code=ErrorCode.H3_NO_ERROR)
 
 
 if __name__ == "__main__":
@@ -438,6 +439,11 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--ca-certs", type=str, help="load CA certificates from the specified file"
+    )
+    parser.add_argument(
+        "--certificate",
+        type=str,
+        help="load the TLS certificate from the specified file",
     )
     parser.add_argument(
         "--cipher-suites",
@@ -463,6 +469,16 @@ if __name__ == "__main__":
         help="include the HTTP response headers in the output",
     )
     parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="do not validate server certificate",
+    )
+    parser.add_argument(
+        "--legacy-http",
+        action="store_true",
+        help="use HTTP/0.9",
+    )
+    parser.add_argument(
         "--max-data",
         type=int,
         help="connection-wide flow control limit (default: %d)" % defaults.max_data,
@@ -473,16 +489,20 @@ if __name__ == "__main__":
         help="per-stream flow control limit (default: %d)" % defaults.max_stream_data,
     )
     parser.add_argument(
-        "-k",
-        "--insecure",
+        "--negotiate-v2",
         action="store_true",
-        help="do not validate server certificate",
+        help="start with QUIC v1 and try to negotiate QUIC v2",
     )
-    parser.add_argument("--legacy-http", action="store_true", help="use HTTP/0.9")
+
     parser.add_argument(
         "--output-dir",
         type=str,
         help="write downloaded files to this directory",
+    )
+    parser.add_argument(
+        "--private-key",
+        type=str,
+        help="load the TLS private key from the specified file",
     )
     parser.add_argument(
         "-q",
@@ -550,6 +570,12 @@ if __name__ == "__main__":
         configuration.max_data = args.max_data
     if args.max_stream_data:
         configuration.max_stream_data = args.max_stream_data
+    if args.negotiate_v2:
+        configuration.original_version = QuicProtocolVersion.VERSION_1
+        configuration.supported_versions = [
+            QuicProtocolVersion.VERSION_2,
+            QuicProtocolVersion.VERSION_1,
+        ]
     if args.quic_log:
         configuration.quic_logger = QuicFileLogger(args.quic_log)
     if args.secrets_log:
@@ -562,6 +588,10 @@ if __name__ == "__main__":
             pass
     
     configuration.idle_timeout = 60 * 60;
+
+    # load SSL certificate and key
+    if args.certificate is not None:
+        configuration.load_cert_chain(args.certificate, args.private_key)
 
     if uvloop is not None:
         uvloop.install()

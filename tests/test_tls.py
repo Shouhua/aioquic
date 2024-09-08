@@ -43,6 +43,7 @@ from aioquic.tls import (
 )
 from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from .utils import (
     SERVER_CACERTFILE,
@@ -115,6 +116,11 @@ def reset_buffers(buffers):
 
 
 class ContextTest(TestCase):
+    def assertClientHello(self, data: bytes):
+        self.assertEqual(data[0], tls.HandshakeType.CLIENT_HELLO)
+        self.assertGreaterEqual(len(data), 191)
+        self.assertLessEqual(len(data), 564)
+
     def create_client(
         self, alpn_protocols=None, cadata=None, cafile=SERVER_CACERTFILE, **kwargs
     ):
@@ -378,8 +384,7 @@ class ContextTest(TestCase):
         client.handle_message(b"", client_buf)
         self.assertEqual(client.state, State.CLIENT_EXPECT_SERVER_HELLO)
         server_input = merge_buffers(client_buf)
-        self.assertGreaterEqual(len(server_input), 181)
-        self.assertLessEqual(len(server_input), 358)
+        self.assertClientHello(server_input)
         reset_buffers(client_buf)
 
         # Handle client hello.
@@ -444,8 +449,7 @@ class ContextTest(TestCase):
         client.handle_message(b"", client_buf)
         self.assertEqual(client.state, State.CLIENT_EXPECT_SERVER_HELLO)
         server_input = merge_buffers(client_buf)
-        self.assertGreaterEqual(len(server_input), 181)
-        self.assertLessEqual(len(server_input), 358)
+        self.assertClientHello(server_input)
         reset_buffers(client_buf)
 
         # Handle client hello.
@@ -503,8 +507,7 @@ class ContextTest(TestCase):
         client.handle_message(b"", client_buf)
         self.assertEqual(client.state, State.CLIENT_EXPECT_SERVER_HELLO)
         server_input = merge_buffers(client_buf)
-        self.assertGreaterEqual(len(server_input), 181)
-        self.assertLessEqual(len(server_input), 358)
+        self.assertClientHello(server_input)
         reset_buffers(client_buf)
 
         # Handle client hello.
@@ -565,9 +568,14 @@ class ContextTest(TestCase):
         self.assertEqual(client.alpn_negotiated, None)
         self.assertEqual(server.alpn_negotiated, None)
 
-    def test_handshake_with_ec_certificate(self):
+    def test_handshake_with_ec_certificate_secp256r1(self):
         self._test_handshake_with_certificate(
-            *generate_ec_certificate(common_name="example.com")
+            *generate_ec_certificate(common_name="example.com", curve=ec.SECP256R1)
+        )
+
+    def test_handshake_with_ec_certificate_secp384r1(self):
+        self._test_handshake_with_certificate(
+            *generate_ec_certificate(common_name="example.com", curve=ec.SECP384R1)
         )
 
     def test_handshake_with_ed25519_certificate(self):
@@ -581,26 +589,54 @@ class ContextTest(TestCase):
         )
 
     def test_handshake_with_alpn(self):
-        client = self.create_client(alpn_protocols=["hq-20"])
-        server = self.create_server(alpn_protocols=["hq-20", "h3-20"])
+        client = self.create_client(alpn_protocols=["hq-interop"])
+        server = self.create_server(alpn_protocols=["hq-interop", "h3"])
 
         self._handshake(client, server)
 
         # check ALPN matches
-        self.assertEqual(client.alpn_negotiated, "hq-20")
-        self.assertEqual(server.alpn_negotiated, "hq-20")
+        self.assertEqual(client.alpn_negotiated, "hq-interop")
+        self.assertEqual(server.alpn_negotiated, "hq-interop")
 
     def test_handshake_with_alpn_fail(self):
-        client = self.create_client(alpn_protocols=["hq-20"])
-        server = self.create_server(alpn_protocols=["h3-20"])
+        client = self.create_client(alpn_protocols=["hq-interop"])
+        server = self.create_server(alpn_protocols=["h3"])
 
         with self.assertRaises(tls.AlertHandshakeFailure) as cm:
             self._handshake(client, server)
         self.assertEqual(str(cm.exception), "No common ALPN protocols")
 
+    def test_handshake_with_rsa_pkcs1_sha1_signature(self):
+        client = self.create_client()
+        client._signature_algorithms = [tls.SignatureAlgorithm.RSA_PKCS1_SHA1]
+        server = self.create_server()
+
+        self._handshake(client, server)
+
     def test_handshake_with_rsa_pkcs1_sha256_signature(self):
         client = self.create_client()
         client._signature_algorithms = [tls.SignatureAlgorithm.RSA_PKCS1_SHA256]
+        server = self.create_server()
+
+        self._handshake(client, server)
+
+    def test_handshake_with_rsa_pkcs1_sha384_signature(self):
+        client = self.create_client()
+        client._signature_algorithms = [tls.SignatureAlgorithm.RSA_PKCS1_SHA384]
+        server = self.create_server()
+
+        self._handshake(client, server)
+
+    def test_handshake_with_rsa_pss_rsae_sha256_signature(self):
+        client = self.create_client()
+        client._signature_algorithms = [tls.SignatureAlgorithm.RSA_PSS_RSAE_SHA256]
+        server = self.create_server()
+
+        self._handshake(client, server)
+
+    def test_handshake_with_rsa_pss_rsae_sha384_signature(self):
+        client = self.create_client()
+        client._signature_algorithms = [tls.SignatureAlgorithm.RSA_PSS_RSAE_SHA384]
         server = self.create_server()
 
         self._handshake(client, server)
@@ -622,6 +658,20 @@ class ContextTest(TestCase):
     def test_handshake_with_grease_group(self):
         client = self.create_client()
         client._supported_groups = [tls.Group.GREASE, tls.Group.SECP256R1]
+        server = self.create_server()
+
+        self._handshake(client, server)
+
+    def test_handshake_with_secp256r1_group(self):
+        client = self.create_client()
+        client._supported_groups = [tls.Group.SECP256R1]
+        server = self.create_server()
+
+        self._handshake(client, server)
+
+    def test_handshake_with_secp384r1_group(self):
+        client = self.create_client()
+        client._supported_groups = [tls.Group.SECP384R1]
         server = self.create_server()
 
         self._handshake(client, server)
@@ -695,8 +745,7 @@ class ContextTest(TestCase):
             client.handle_message(b"", client_buf)
             self.assertEqual(client.state, State.CLIENT_EXPECT_SERVER_HELLO)
             server_input = merge_buffers(client_buf)
-            self.assertGreaterEqual(len(server_input), 383)
-            self.assertLessEqual(len(server_input), 483)
+            self.assertClientHello(server_input)
             reset_buffers(client_buf)
 
             # Handle client hello.
@@ -748,8 +797,7 @@ class ContextTest(TestCase):
             client.handle_message(b"", client_buf)
             self.assertEqual(client.state, State.CLIENT_EXPECT_SERVER_HELLO)
             server_input = merge_buffers(client_buf)
-            self.assertGreaterEqual(len(server_input), 383)
-            self.assertLessEqual(len(server_input), 483)
+            self.assertClientHello(server_input)
             reset_buffers(client_buf)
 
             # tamper with binder
@@ -774,8 +822,7 @@ class ContextTest(TestCase):
             client.handle_message(b"", client_buf)
             self.assertEqual(client.state, State.CLIENT_EXPECT_SERVER_HELLO)
             server_input = merge_buffers(client_buf)
-            self.assertGreaterEqual(len(server_input), 383)
-            self.assertLessEqual(len(server_input), 483)
+            self.assertClientHello(server_input)
             reset_buffers(client_buf)
 
             # handle client hello

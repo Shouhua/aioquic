@@ -31,9 +31,9 @@ What is ``aioquic``?
 ``aioquic`` is a library for the QUIC network protocol in Python. It features
 a minimal TLS 1.3 implementation, a QUIC stack and an HTTP/3 stack.
 
-QUIC was standardised in `RFC 9000`_ and HTTP/3 in `RFC 9114`_.
-``aioquic`` is regularly tested for interoperability against other
-`QUIC implementations`_.
+``aioquic`` is used by Python opensource projects such as `dnspython`_,
+`hypercorn`_, `mitmproxy`_ and the `Web Platform Tests`_ cross-browser test
+suite. It has also been used extensively in research papers about QUIC.
 
 To learn more about ``aioquic`` please `read the documentation`_.
 
@@ -49,15 +49,20 @@ leaving actual I/O operations to the API user. This approach has a number of
 advantages including making the code testable and allowing integration with
 different concurrency models.
 
+A lot of effort has gone into writing an extensive test suite for the
+``aioquic`` code to ensure best-in-class code quality, and it is regularly
+`tested for interoperability`_ against other `QUIC implementations`_.
+
 Features
 --------
 
 - minimal TLS 1.3 implementation conforming with `RFC 8446`_
-- QUIC stack conforming with `RFC 9000`_
+- QUIC stack conforming with `RFC 9000`_ (QUIC v1) and `RFC 9369`_ (QUIC v2)
    * IPv4 and IPv6 support
    * connection migration and NAT rebinding
    * logging TLS traffic secrets
    * logging QUIC events in QLOG format
+   * version negotiation conforming with `RFC 9368`_
 - HTTP/3 stack conforming with `RFC 9114`_
    * server push support
    * WebSocket bootstrapping conforming with `RFC 9220`_
@@ -138,6 +143,11 @@ License
 ``aioquic`` is released under the `BSD license`_.
 
 .. _read the documentation: https://aioquic.readthedocs.io/en/latest/
+.. _dnspython: https://github.com/rthalley/dnspython
+.. _hypercorn: https://github.com/pgjones/hypercorn
+.. _mitmproxy: https://github.com/mitmproxy/mitmproxy
+.. _Web Platform Tests: https://github.com/web-platform-tests/wpt
+.. _tested for interoperability: https://interop.seemann.io/
 .. _QUIC implementations: https://github.com/quicwg/base-drafts/wiki/Implementations
 .. _cryptography: https://cryptography.io/
 .. _Chocolatey: https://chocolatey.org/
@@ -147,3 +157,5 @@ License
 .. _RFC 9114: https://datatracker.ietf.org/doc/html/rfc9114
 .. _RFC 9220: https://datatracker.ietf.org/doc/html/rfc9220
 .. _RFC 9297: https://datatracker.ietf.org/doc/html/rfc9297
+.. _RFC 9368: https://datatracker.ietf.org/doc/html/rfc9368
+.. _RFC 9369: https://datatracker.ietf.org/doc/html/rfc9369
